@@ -1,0 +1,1790 @@
+openapi: 3.0.3
+info:
+  title: RippleFlow API
+  description: |
+    组织群聊信息智能加工系统 REST API。
+
+    **认证**：所有 `/api/v1/*` 和 `/admin/*` 接口需携带 JWT（HttpOnly Cookie `rf_token`）。
+    Webhook 接口使用 `X-Webhook-Secret` 请求头鉴权。
+
+    **错误码约定**：
+    - `400` 参数校验失败
+    - `401` 未登录/Token 过期
+    - `403` 无权限（非白名单 / 非当事人）
+    - `404` 资源不存在
+    - `409` 状态冲突（如已授权的内容重复授权）
+    - `422` 业务规则校验失败
+    - `500` 服务内部错误
+  version: "0.1.0"
+
+servers:
+  - url: http://rippleflow.internal
+    description: 内网部署地址
+
+tags:
+  - name: auth
+    description: 认证与会话
+  - name: webhook
+    description: 聊天工具消息接收
+  - name: threads
+    description: 话题线索（知识库核心）
+  - name: search
+    description: 搜索与问答
+  - name: reference
+    description: 参考信息手册
+  - name: action-items
+    description: 任务待办
+  - name: sensitive
+    description: 敏感内容授权
+  - name: summarize
+    description: 讨论纪要生成
+  - name: notifications
+    description: App 内通知
+  - name: admin
+    description: 管理后台（需 admin 角色）
+  - name: bot
+    description: 机器人查询入口
+  - name: feedback
+    description: 问答反馈收集
+  - name: contribution
+    description: 用户贡献统计
+  - name: butler
+    description: AI 管家服务
+
+# ─────────────────────────────────────────────────────────────────────
+# COMPONENTS
+# ─────────────────────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: rf_token
+    webhookSecret:
+      type: apiKey
+      in: header
+      name: X-Webhook-Secret
+    botAuth:
+      type: apiKey
+      in: header
+      name: X-Bot-Token
+      description: 聊天机器人专用认证 Token
+
+  schemas:
+
+    # ── 通用 ──────────────────────────────────────────────────────────
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:    { type: string, example: "UNAUTHORIZED" }
+        message: { type: string, example: "Token 已过期，请重新登录" }
+        detail:  { type: object }
+
+    PaginationMeta:
+      type: object
+      properties:
+        total:   { type: integer }
+        page:    { type: integer }
+        size:    { type: integer }
+        pages:   { type: integer }
+
+    # ── 认证 ──────────────────────────────────────────────────────────
+    CurrentUser:
+      type: object
+      properties:
+        ldap_user_id: { type: string, example: "zhangsan" }
+        display_name: { type: string, example: "张三" }
+        email:        { type: string, example: "zhangsan@company.com" }
+        role:         { type: string, enum: [member, admin] }
+
+    # ── 消息（Webhook 入参）─────────────────────────────────────────────
+    InboundMessage:
+      type: object
+      required: [message_id, room_id, sender, content, content_type, sent_at]
+      properties:
+        message_id:
+          type: string
+          description: 聊天工具内的唯一消息 ID
+          example: "msg_abc123"
+        room_id:
+          type: string
+          example: "room_dev_backend"
+        sender:
+          type: object
+          required: [user_id, display_name]
+          properties:
+            user_id:      { type: string }
+            display_name: { type: string }
+        content:
+          type: string
+          example: "Redis 连接超时怎么处理？"
+        content_type:
+          type: string
+          enum: [text, image, file, audio, video, code]
+          default: text
+        attachments:
+          type: array
+          items:
+            type: object
+            properties:
+              type: { type: string }
+              url:  { type: string }
+              name: { type: string }
+        reply_to:
+          type: string
+          nullable: true
+          description: 被回复消息的 external_msg_id
+        thread_root:
+          type: string
+          nullable: true
+          description: 会话线索根消息的 external_msg_id
+        mentions:
+          type: array
+          items: { type: string }
+          description: 被@的用户 external_id 列表
+        sent_at:
+          type: string
+          format: date-time
+
+    # ── 话题线索 ──────────────────────────────────────────────────────
+    ThreadSummary:
+      type: object
+      properties:
+        id:               { type: string, format: uuid }
+        title:            { type: string }
+        category:         { type: string }
+        status:           { type: string, enum: [active, resolved, archived, merged] }
+        summary_preview:  { type: string, description: "摘要前 200 字" }
+        tags:             { type: array, items: { type: string } }
+        message_count:    { type: integer }
+        last_message_at:  { type: string, format: date-time }
+        primary_room_id:  { type: string, format: uuid, nullable: true }
+        is_stakeholder:   { type: boolean, description: "当前用户是否为当事人" }
+
+    ThreadDetail:
+      allOf:
+        - $ref: '#/components/schemas/ThreadSummary'
+        - type: object
+          properties:
+            summary:          { type: string }
+            summary_version:  { type: integer }
+            summary_updated_at: { type: string, format: date-time }
+            structured_data:  { type: object }
+            stakeholder_ids:  { type: array, items: { type: string } }
+            mentioned_services: { type: array, items: { type: string } }
+            mentioned_techs:  { type: array, items: { type: string } }
+            related_threads:
+              type: array
+              items: { $ref: '#/components/schemas/ThreadSummary' }
+            source_rooms:
+              type: array
+              items:
+                type: object
+                properties:
+                  room_id:   { type: string, format: uuid }
+                  room_name: { type: string }
+
+    SummaryHistoryEntry:
+      type: object
+      properties:
+        version:       { type: integer }
+        summary:       { type: string }
+        change_reason: { type: string }
+        changed_by:    { type: string, nullable: true }
+        created_at:    { type: string, format: date-time }
+
+    ModificationRecord:
+      type: object
+      properties:
+        id:                   { type: string, format: uuid }
+        modified_by:          { type: string }
+        modified_by_name:     { type: string }
+        field_modified:       { type: string }
+        value_before:         { type: string, nullable: true }
+        value_after:          { type: string, nullable: true }
+        modification_reason:  { type: string }
+        synced_to_chat:       { type: boolean }
+        synced_at:            { type: string, format: date-time, nullable: true }
+        created_at:           { type: string, format: date-time }
+
+    UpdateSummaryRequest:
+      type: object
+      required: [field, new_value, reason]
+      properties:
+        field:
+          type: string
+          enum: [summary, structured_data, tags, status]
+        new_value:
+          type: string
+          description: "新内容（summary 为文本；structured_data 为 JSON 字符串；tags 为逗号分隔；status 为枚举值）"
+        reason:
+          type: string
+          minLength: 5
+          description: "修正原因（必填）"
+
+    # ── 搜索与问答 ────────────────────────────────────────────────────
+    SearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          minLength: 1
+          example: "Redis 连接超时"
+        categories:
+          type: array
+          items: { type: string }
+          description: "限定类别，默认全部"
+        date_from:
+          type: string
+          format: date
+          nullable: true
+        date_to:
+          type: string
+          format: date
+          nullable: true
+        ignore_window:
+          type: boolean
+          default: false
+          description: "是否忽略时间窗口限制"
+        page:  { type: integer, default: 1, minimum: 1 }
+        size:  { type: integer, default: 20, minimum: 1, maximum: 100 }
+
+    SearchResult:
+      type: object
+      properties:
+        threads:
+          type: array
+          items: { $ref: '#/components/schemas/ThreadSummary' }
+        meta: { $ref: '#/components/schemas/PaginationMeta' }
+
+    QARequest:
+      type: object
+      required: [question]
+      properties:
+        question:
+          type: string
+          minLength: 2
+          example: "Redis 连接超时怎么处理？"
+        categories:
+          type: array
+          items: { type: string }
+        ignore_window:
+          type: boolean
+          default: false
+
+    QAResponse:
+      type: object
+      properties:
+        answer:
+          type: string
+          description: "LLM 综合答案"
+        sources:
+          type: array
+          items:
+            type: object
+            properties:
+              thread_id:    { type: string, format: uuid }
+              title:        { type: string }
+              category:     { type: string }
+              summary_excerpt: { type: string }
+              last_active:  { type: string, format: date-time }
+        keywords_used:
+          type: array
+          items: { type: string }
+          description: "LLM 提取的检索关键词"
+        no_result:
+          type: boolean
+          description: "未找到相关内容时为 true"
+
+    # ── 参考信息 ──────────────────────────────────────────────────────
+    ReferenceItem:
+      type: object
+      properties:
+        id:            { type: string, format: uuid }
+        thread_id:     { type: string, format: uuid, nullable: true }
+        resource_type: { type: string, enum: [ip, url, endpoint, domain, account, port, other] }
+        label:         { type: string }
+        value:         { type: string, nullable: true }
+        is_sensitive:  { type: boolean }
+        environment:   { type: string, nullable: true }
+        service_name:  { type: string, nullable: true }
+        description:   { type: string, nullable: true }
+        is_deprecated: { type: boolean }
+        shared_by:     { type: string, nullable: true }
+        created_at:    { type: string, format: date-time }
+
+    DeprecateReferenceRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string }
+
+    # ── 任务待办 ──────────────────────────────────────────────────────
+    ActionItemSummary:
+      type: object
+      properties:
+        thread_id:  { type: string, format: uuid }
+        title:      { type: string }
+        task:       { type: string }
+        assignee:   { type: string }
+        due_date:   { type: string, format: date, nullable: true }
+        priority:   { type: string, enum: [high, medium, low] }
+        status:     { type: string, enum: [open, in_progress, done, cancelled] }
+        last_message_at: { type: string, format: date-time }
+
+    UpdateActionItemStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [open, in_progress, done, cancelled] }
+
+    # ── 敏感授权 ──────────────────────────────────────────────────────
+    SensitivePendingItem:
+      type: object
+      properties:
+        id:                { type: string, format: uuid }
+        message_preview:   { type: string }
+        sensitive_types:   { type: array, items: { type: string } }
+        sensitive_summary: { type: string }
+        sender_name:       { type: string }
+        sent_at:           { type: string, format: date-time }
+        room_name:         { type: string }
+        decisions:         { type: object, additionalProperties: true }
+        days_pending:      { type: number }
+        my_status:
+          type: string
+          enum: [pending, authorize, reject, desensitize]
+          description: "当前登录用户的决策状态"
+
+    SensitiveDecisionRequest:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          enum: [authorize, reject, desensitize]
+        note:
+          type: string
+          nullable: true
+          description: "脱敏说明（decision=desensitize 时填写）"
+        desensitized_content:
+          type: string
+          nullable: true
+          description: "脱敏后的内容（decision=desensitize 时提交）"
+
+    AdminSensitiveOverrideRequest:
+      type: object
+      required: [action, reason]
+      properties:
+        action:
+          type: string
+          enum: [remove_stakeholder, force_authorize, force_reject]
+        target_user:
+          type: string
+          nullable: true
+          description: "remove_stakeholder 时必填"
+        reason:
+          type: string
+          minLength: 5
+
+    # ── 纪要生成 ──────────────────────────────────────────────────────
+    SummarizeRequest:
+      type: object
+      required: [room_id]
+      properties:
+        room_id:
+          type: string
+          description: "聊天工具的群组 ID"
+        from_time:
+          type: string
+          format: date-time
+          nullable: true
+          description: "起始时间，默认过去 4 小时"
+        to_time:
+          type: string
+          format: date-time
+          nullable: true
+          description: "结束时间，默认当前"
+        title_hint:
+          type: string
+          nullable: true
+          description: "纪要标题提示"
+
+    SummarizeResponse:
+      type: object
+      properties:
+        thread_id:       { type: string, format: uuid }
+        title:           { type: string }
+        summary:         { type: string }
+        participants:    { type: array, items: { type: string } }
+        decisions:       { type: array, items: { type: string } }
+        action_items:    { type: array, items: { type: string } }
+        open_questions:  { type: array, items: { type: string } }
+        message_count:   { type: integer }
+
+    # ── 通知 ──────────────────────────────────────────────────────────
+    Notification:
+      type: object
+      properties:
+        id:           { type: string, format: uuid }
+        type:         { type: string }
+        title:        { type: string }
+        body:         { type: string, nullable: true }
+        action_url:   { type: string, nullable: true }
+        related_id:   { type: string, format: uuid, nullable: true }
+        related_type: { type: string, nullable: true }
+        is_read:      { type: boolean }
+        created_at:   { type: string, format: date-time }
+
+    # ── 管理后台 ──────────────────────────────────────────────────────
+    WhitelistEntry:
+      type: object
+      properties:
+        ldap_user_id: { type: string }
+        display_name: { type: string }
+        email:        { type: string, nullable: true }
+        role:         { type: string, enum: [member, admin] }
+        added_by:     { type: string, nullable: true }
+        added_at:     { type: string, format: date-time }
+        is_active:    { type: boolean }
+
+    AddWhitelistRequest:
+      type: object
+      required: [ldap_user_id, display_name]
+      properties:
+        ldap_user_id: { type: string }
+        display_name: { type: string }
+        email:        { type: string, nullable: true }
+        role:         { type: string, enum: [member, admin], default: member }
+        notes:        { type: string, nullable: true }
+
+    CategoryEntry:
+      type: object
+      properties:
+        id:                  { type: string, format: uuid }
+        code:                { type: string }
+        display_name:        { type: string }
+        description:         { type: string, nullable: true }
+        trigger_hints:       { type: array, items: { type: string } }
+        search_window_days:  { type: integer, nullable: true }
+        is_active:           { type: boolean }
+        is_builtin:          { type: boolean }
+        sort_order:          { type: integer }
+
+    CreateCategoryRequest:
+      type: object
+      required: [code, display_name, trigger_hints]
+      properties:
+        code:               { type: string, pattern: '^[a-z_]+$' }
+        display_name:       { type: string }
+        description:        { type: string, nullable: true }
+        trigger_hints:      { type: array, items: { type: string }, minItems: 1 }
+        search_window_days: { type: integer, nullable: true }
+
+    SystemStats:
+      type: object
+      properties:
+        messages_total:         { type: integer }
+        messages_processed:     { type: integer }
+        messages_skipped_noise: { type: integer }
+        messages_sensitive_pending: { type: integer }
+
+    # ── 机器人查询 ──────────────────────────────────────────────────────
+    BotQueryRequest:
+      type: object
+      required: [query, user_id, room_id]
+      properties:
+        query:
+          type: string
+          minLength: 1
+          description: 用户原始自然语言输入
+          example: "Redis 连接池怎么配置"
+        user_id:
+          type: string
+          description: 发送者的 ldap_user_id
+        room_id:
+          type: string
+          description: 群组 external_id
+        reply_to_msg_id:
+          type: string
+          nullable: true
+          description: 如果是回复某条消息，提供该消息 ID
+
+    BotQueryResponse:
+      type: object
+      properties:
+        intent:
+          type: string
+          enum: [search, action_items, reference, summarize, unknown]
+          description: 识别出的意图
+        confidence:
+          type: number
+          format: float
+          description: 意图识别置信度
+        response_type:
+          type: string
+          enum: [text, card, list, error]
+          description: 响应类型
+        content:
+          oneOf:
+            - type: string
+              description: 文本响应
+            - type: object
+              description: 卡片响应
+              properties:
+                title:    { type: string }
+                body:     { type: string }
+                footer:   { type: string, nullable: true }
+                action_url: { type: string, nullable: true }
+            - type: array
+              description: 列表响应
+              items:
+                type: object
+                properties:
+                  thread_id:  { type: string, format: uuid }
+                  title:      { type: string }
+                  category:   { type: string }
+                  excerpt:    { type: string }
+                  stakeholders: { type: array, items: { type: string } }
+                  last_active: { type: string, format: date-time }
+        suggestions:
+          type: array
+          items: { type: string }
+          description: 后续建议问题
+          example: ["详细说说第一条", "还有其他相关内容吗？"]
+        entities:
+          type: object
+          description: 从查询中提取的实体
+          properties:
+            keywords:
+              type: array
+              items: { type: string }
+            time_range:
+              type: object
+              nullable: true
+              properties:
+                from: { type: string, format: date-time }
+                to:   { type: string, format: date-time }
+            environment:
+              type: string
+              nullable: true
+              example: "prod"
+        error_message:
+          type: string
+          nullable: true
+          description: 当 intent=unknown 或出错时的提示信息
+
+    # ── 问答反馈 ──────────────────────────────────────────────────────
+    FeedbackRequest:
+      type: object
+      required: [question, answer, is_helpful]
+      properties:
+        question:
+          type: string
+          description: 用户原始问题
+        answer:
+          type: string
+          description: 系统返回的答案
+        is_helpful:
+          type: boolean
+          description: 是否有帮助
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+          nullable: true
+          description: 1-5 分评分
+        comment:
+          type: string
+          nullable: true
+          description: 用户备注
+        source_thread_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: 答案来源线索 ID
+
+    FeedbackStats:
+      type: object
+      properties:
+        total_feedback: { type: integer }
+        helpful_count: { type: integer }
+        not_helpful_count: { type: integer }
+        avg_rating: { type: number, nullable: true }
+        helpful_rate: { type: number, description: "有帮助比例 0-1" }
+
+    # ── 用户贡献 ──────────────────────────────────────────────────────
+    UserContribution:
+      type: object
+      properties:
+        user_id: { type: string }
+        display_name: { type: string }
+        threads_participated: { type: integer }
+        messages_count: { type: integer }
+        summaries_edited: { type: integer }
+        decisions_made: { type: integer }
+        questions_asked: { type: integer }
+        answers_viewed: { type: integer }
+        avg_rating_received: { type: number, nullable: true }
+        weekly_rank: { type: integer, nullable: true }
+        monthly_rank: { type: integer, nullable: true }
+
+    LeaderboardEntry:
+      type: object
+      properties:
+        rank: { type: integer }
+        user_id: { type: string }
+        display_name: { type: string }
+        score: { type: integer, description: "综合贡献分" }
+        threads_participated: { type: integer }
+        summaries_edited: { type: integer }
+
+    # ── AI 管家 ──────────────────────────────────────────────────────
+    WeeklyDigest:
+      type: object
+      properties:
+        period:
+          type: object
+          properties:
+            from: { type: string, format: date }
+            to: { type: string, format: date }
+        summary:
+          type: object
+          properties:
+            total_threads: { type: integer }
+            threads_by_category: { type: object, additionalProperties: { type: integer } }
+            total_messages: { type: integer }
+            active_users: { type: integer }
+        hot_discussions:
+          type: array
+          items:
+            type: object
+            properties:
+              thread_id: { type: string, format: uuid }
+              title: { type: string }
+              message_count: { type: integer }
+              category: { type: string }
+        new_decisions:
+          type: array
+          items:
+            type: object
+            properties:
+              thread_id: { type: string, format: uuid }
+              title: { type: string }
+              category: { type: string }
+        due_action_items:
+          type: array
+          items:
+            type: object
+            properties:
+              thread_id: { type: string, format: uuid }
+              task: { type: string }
+              assignee: { type: string }
+              due_date: { type: string, format: date }
+        generated_at: { type: string, format: date-time }
+
+    HealthReport:
+      type: object
+      properties:
+        generated_at: { type: string, format: date-time }
+        overall_score: { type: number, description: "健康度综合评分 0-100" }
+        metrics:
+          type: object
+          properties:
+            knowledge_coverage:
+              type: object
+              properties:
+                score: { type: number }
+                total_threads: { type: integer }
+                orphan_threads: { type: integer, description: "无关联消息的线索" }
+            qa_quality:
+              type: object
+              properties:
+                score: { type: number }
+                avg_rating: { type: number }
+                helpful_rate: { type: number }
+            user_engagement:
+              type: object
+              properties:
+                score: { type: number }
+                active_users_7d: { type: integer }
+                avg_daily_queries: { type: number }
+            freshness:
+              type: object
+              properties:
+                score: { type: number }
+                avg_thread_age_days: { type: number }
+                stale_threads_count: { type: integer, description: "超过时间窗口的线索" }
+        recommendations:
+          type: array
+          items: { type: string }
+          description: "优化建议"
+
+    ButlerTask:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        task_type: { type: string }
+        status: { type: string }
+        scheduled_at: { type: string, format: date-time }
+        executed_at: { type: string, format: date-time, nullable: true }
+        target_room_id: { type: string, format: uuid, nullable: true }
+        target_user_ids: { type: array, items: { type: string } }
+        payload: { type: object }
+        result: { type: object, nullable: true }
+        error: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    ButlerExperience:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        category: { type: string }
+        key: { type: string }
+        value: { type: object }
+        confidence: { type: number }
+        sample_count: { type: integer }
+        last_updated: { type: string, format: date-time }
+
+    # ── 系统统计（已有）──────────────────────────────────────────────
+    SystemStats:
+      type: object
+      properties:
+# ─────────────────────────────────────────────────────────────────────
+paths:
+
+  # ════════════════════════════════════════════════════
+  # AUTH
+  # ════════════════════════════════════════════════════
+
+  /auth/sso:
+    get:
+      tags: [auth]
+      summary: 发起 SSO 登录
+      description: 重定向至企业 SSO 登录页
+      security: []
+      parameters:
+        - in: query
+          name: redirect
+          schema: { type: string }
+          description: 登录成功后的跳转路径
+      responses:
+        '302':
+          description: 重定向至 SSO
+
+  /auth/callback:
+    get:
+      tags: [auth]
+      summary: SSO 回调处理
+      security: []
+      parameters:
+        - in: query
+          name: token
+          required: true
+          schema: { type: string }
+      responses:
+        '302':
+          description: 登录成功，设置 Cookie，重定向至 dashboard
+        '403':
+          description: 用户不在白名单
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: 登出，清除 Cookie
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: 登出成功
+
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: 获取当前登录用户信息
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: 用户信息
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CurrentUser' }
+        '401':
+          description: 未登录
+
+  # ════════════════════════════════════════════════════
+  # WEBHOOK
+  # ════════════════════════════════════════════════════
+
+  /webhook/message:
+    post:
+      tags: [webhook]
+      summary: 接收聊天工具推送的新消息
+      security:
+        - webhookSecret: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InboundMessage' }
+      responses:
+        '200':
+          description: 消息已接收入队
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  received:    { type: boolean }
+                  message_id:  { type: string }
+        '400':
+          description: 请求参数错误
+        '401':
+          description: Webhook Secret 无效
+
+  # ════════════════════════════════════════════════════
+  # THREADS（话题线索）
+  # ════════════════════════════════════════════════════
+
+  /api/v1/threads:
+    get:
+      tags: [threads]
+      summary: 获取话题线索列表
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: category
+          schema: { type: string }
+          description: 按类别过滤
+        - in: query
+          name: status
+          schema: { type: string, enum: [active, resolved, archived] }
+        - in: query
+          name: q
+          schema: { type: string }
+          description: 全文检索关键词
+        - in: query
+          name: ignore_window
+          schema: { type: boolean, default: false }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: size
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          description: 线索列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/ThreadSummary' } }
+                  meta:  { $ref: '#/components/schemas/PaginationMeta' }
+
+  /api/v1/threads/{thread_id}:
+    get:
+      tags: [threads]
+      summary: 获取话题线索详情
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: thread_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 线索详情
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ThreadDetail' }
+        '404':
+          description: 线索不存在
+
+  /api/v1/threads/{thread_id}/summary:
+    put:
+      tags: [threads]
+      summary: 当事人修改话题线索（摘要/结构化数据/状态）
+      description: |
+        仅当事人（stakeholder_ids 中）或管理员可调用。
+        修改后自动异步同步至原群（冠以用户名）。
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: thread_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateSummaryRequest' }
+      responses:
+        '200':
+          description: 修改成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ThreadDetail' }
+        '403':
+          description: 非当事人，无修改权限
+        '404':
+          description: 线索不存在
+
+  /api/v1/threads/{thread_id}/history:
+    get:
+      tags: [threads]
+      summary: 获取话题线索摘要历史版本
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: thread_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 历史版本列表（降序）
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SummaryHistoryEntry' }
+
+  /api/v1/threads/{thread_id}/modifications:
+    get:
+      tags: [threads]
+      summary: 获取话题线索的当事人修改记录
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: thread_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 修改记录列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ModificationRecord' }
+
+  # ════════════════════════════════════════════════════
+  # SEARCH & Q&A
+  # ════════════════════════════════════════════════════
+
+  /api/v1/search:
+    post:
+      tags: [search]
+      summary: 全文检索话题线索
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SearchRequest' }
+      responses:
+        '200':
+          description: 检索结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SearchResult' }
+
+  /api/v1/qa:
+    post:
+      tags: [search]
+      summary: LLM 智能问答（基于摘要上下文）
+      description: |
+        1. 提取关键词
+        2. 全文检索相关线索
+        3. 将 Top-10 摘要传给 GLM-4-Plus 生成答案
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/QARequest' }
+      responses:
+        '200':
+          description: 问答结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QAResponse' }
+
+  # ════════════════════════════════════════════════════
+  # REFERENCE DATA
+  # ════════════════════════════════════════════════════
+
+  /api/v1/reference:
+    get:
+      tags: [reference]
+      summary: 获取参考信息列表
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+          description: 关键词（标签/服务名模糊匹配）
+        - in: query
+          name: resource_type
+          schema: { type: string }
+        - in: query
+          name: environment
+          schema: { type: string }
+        - in: query
+          name: service_name
+          schema: { type: string }
+        - in: query
+          name: include_deprecated
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: 参考信息列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ReferenceItem' }
+
+  /api/v1/reference/{item_id}:
+    get:
+      tags: [reference]
+      summary: 获取单条参考信息
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: item_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReferenceItem' }
+
+  /api/v1/reference/{item_id}/deprecate:
+    post:
+      tags: [reference]
+      summary: 标记参考信息为已废弃（当事人或管理员）
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: item_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeprecateReferenceRequest' }
+      responses:
+        '200':
+          description: 已标记废弃
+        '403':
+          description: 无权限
+
+  # ════════════════════════════════════════════════════
+  # ACTION ITEMS（任务待办）
+  # ════════════════════════════════════════════════════
+
+  /api/v1/action-items:
+    get:
+      tags: [action-items]
+      summary: 获取任务待办列表
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: assignee
+          schema: { type: string }
+          description: 按负责人过滤（ldap_user_id）
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: priority
+          schema: { type: string, enum: [high, medium, low] }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ActionItemSummary' }
+
+  /api/v1/action-items/{thread_id}/status:
+    put:
+      tags: [action-items]
+      summary: 更新任务状态（当事人）
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: thread_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateActionItemStatusRequest' }
+      responses:
+        '200':
+          description: 状态已更新
+        '403':
+          description: 非当事人
+
+  # ════════════════════════════════════════════════════
+  # SENSITIVE AUTHORIZATIONS（敏感授权）
+  # ════════════════════════════════════════════════════
+
+  /api/v1/sensitive/pending:
+    get:
+      tags: [sensitive]
+      summary: 获取当前用户待处理的敏感内容授权列表
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: 待授权列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SensitivePendingItem' }
+
+  /api/v1/sensitive/{auth_id}:
+    get:
+      tags: [sensitive]
+      summary: 获取单条敏感授权详情（含完整消息内容）
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: auth_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SensitivePendingItem' }
+        '403':
+          description: 非当事人
+
+  /api/v1/sensitive/{auth_id}/decide:
+    post:
+      tags: [sensitive]
+      summary: 当事人提交授权决策
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: auth_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SensitiveDecisionRequest' }
+      responses:
+        '200':
+          description: 决策已记录
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  overall_status: { type: string }
+                  pending_count:  { type: integer }
+        '403':
+          description: 非当事人
+        '409':
+          description: 已做过决策（拒绝后不可更改）
+
+  /api/v1/sensitive/{auth_id}/nudge:
+    post:
+      tags: [sensitive]
+      summary: 催促其他当事人尽快决策（发 App 内通知）
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: auth_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 通知已发送
+        '403':
+          description: 非当事人
+        '429':
+          description: 24 小时内只能催促一次
+
+  # ════════════════════════════════════════════════════
+  # SUMMARIZE（纪要生成）
+  # ════════════════════════════════════════════════════
+
+  /api/v1/summarize:
+    post:
+      tags: [summarize]
+      summary: 触发讨论纪要生成（手动）
+      description: |
+        对指定群组在指定时间段内的消息生成结构化纪要，
+        生成结果作为 discussion_notes 类型的话题线索保存。
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SummarizeRequest' }
+      responses:
+        '200':
+          description: 纪要已生成
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SummarizeResponse' }
+        '422':
+          description: 指定时间段内消息数量不足（< 3 条）
+
+  # ════════════════════════════════════════════════════
+  # NOTIFICATIONS（通知）
+  # ════════════════════════════════════════════════════
+
+  /api/v1/notifications:
+    get:
+      tags: [notifications]
+      summary: 获取当前用户的通知列表
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: unread_only
+          schema: { type: boolean, default: false }
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: size
+          schema: { type: integer, default: 50 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:        { type: array, items: { $ref: '#/components/schemas/Notification' } }
+                  unread_count: { type: integer }
+                  meta:         { $ref: '#/components/schemas/PaginationMeta' }
+
+  /api/v1/notifications/{notification_id}/read:
+    put:
+      tags: [notifications]
+      summary: 标记单条通知为已读
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: notification_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 已标记
+
+  /api/v1/notifications/read-all:
+    put:
+      tags: [notifications]
+      summary: 全部标记为已读
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: 已全部标记
+
+  # ════════════════════════════════════════════════════
+  # ADMIN
+  # ════════════════════════════════════════════════════
+
+  /admin/whitelist:
+    get:
+      tags: [admin]
+      summary: 获取白名单列表
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+        - in: query
+          name: role
+          schema: { type: string }
+        - in: query
+          name: include_inactive
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/WhitelistEntry' }
+    post:
+      tags: [admin]
+      summary: 添加用户到白名单
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddWhitelistRequest' }
+      responses:
+        '201':
+          description: 用户已添加
+        '409':
+          description: 用户已在白名单中
+
+  /admin/whitelist/{ldap_user_id}:
+    put:
+      tags: [admin]
+      summary: 更新白名单用户（角色/激活状态）
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: ldap_user_id
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role:      { type: string, enum: [member, admin] }
+                is_active: { type: boolean }
+                notes:     { type: string }
+      responses:
+        '200':
+          description: 已更新
+    delete:
+      tags: [admin]
+      summary: 从白名单移除用户（软删除，is_active=false）
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: ldap_user_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 已移除
+        '400':
+          description: 不能移除自己
+
+  /admin/categories:
+    get:
+      tags: [admin]
+      summary: 获取信息类别列表
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CategoryEntry' }
+    post:
+      tags: [admin]
+      summary: 新增自定义信息类别
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCategoryRequest' }
+      responses:
+        '201':
+          description: 类别已创建
+        '409':
+          description: code 已存在
+
+  /admin/categories/{category_id}:
+    put:
+      tags: [admin]
+      summary: 更新类别定义（内置类别不可修改 code）
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: category_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                display_name:       { type: string }
+                description:        { type: string }
+                trigger_hints:      { type: array, items: { type: string } }
+                search_window_days: { type: integer, nullable: true }
+                is_active:          { type: boolean }
+      responses:
+        '200':
+          description: 已更新
+
+  /admin/sensitive:
+    get:
+      tags: [admin]
+      summary: 获取所有待处理敏感授权（管理员视图）
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: min_days_pending
+          schema: { type: integer }
+          description: 过滤超过 N 天未处理的
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SensitivePendingItem' }
+
+  /admin/sensitive/{auth_id}/override:
+    post:
+      tags: [admin]
+      summary: 管理员强制介入敏感授权（处理离职员工等情况）
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: auth_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminSensitiveOverrideRequest' }
+      responses:
+        '200':
+          description: 操作已执行，全程留有审计日志
+
+  /admin/stats:
+    get:
+      tags: [admin]
+      summary: 系统统计数据
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SystemStats' }
+
+  # ════════════════════════════════════════════════════
+  # BOT（机器人查询入口）
+  # ════════════════════════════════════════════════════
+
+  /api/v1/bot/query:
+    post:
+      tags: [bot]
+      summary: 机器人自然语言查询入口
+      description: |
+        供聊天机器人调用的统一查询入口。
+        系统会自动识别用户意图并路由到对应服务。
+        查询结果按提问者权限过滤。
+      security:
+        - botAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BotQueryRequest' }
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BotQueryResponse' }
+        '401':
+          description: 机器人认证失败
+        '403':
+          description: 用户不在白名单
+
+  /api/v1/notifications/poll:
+    get:
+      tags: [notifications]
+      summary: 通知长轮询（实时更新）
+      description: |
+        用于前端实时获取通知更新。
+        如果 last_check 之后有新通知，立即返回。
+        否则等待最多 30 秒后返回空结果。
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: last_check
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: 上次检查时间
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  new_count:
+                    type: integer
+                    description: 新通知数量
+                  has_updates:
+                    type: boolean
+
+  /api/v1/action-items/{thread_id}/status:
+    put:
+      tags: [action_items]
+      summary: 更新任务状态
+      description: |
+        更新 action_item 类型线索的任务状态。
+        分配者、被分配者、管理员均可调用。
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: thread_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [pending, in_progress, done, cancelled]
+                note:
+                  type: string
+                  description: 状态变更说明
+      responses:
+        '200':
+          description: 状态已更新
+        '403':
+          description: 无权限（非分配者/被分配者/管理员）
+        '404':
+          description: 线索不存在或非 action_item 类型
+
+  # ════════════════════════════════════════════════════
+  # FEEDBACK（问答反馈）
+  # ════════════════════════════════════════════════════
+
+  /api/v1/feedback:
+    post:
+      tags: [feedback]
+      summary: 提交问答反馈
+      description: 用户对问答结果进行评价，帮助系统优化
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FeedbackRequest' }
+      responses:
+        '200':
+          description: 反馈已提交
+        '400':
+          description: 参数错误
+
+  /api/v1/feedback/stats:
+    get:
+      tags: [feedback]
+      summary: 获取反馈统计
+      description: 管理员查看反馈统计数据
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: from_date
+          schema: { type: string, format: date }
+        - in: query
+          name: to_date
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FeedbackStats' }
+        '403':
+          description: 非管理员
+
+  # ════════════════════════════════════════════════════
+  # CONTRIBUTION（用户贡献）
+  # ════════════════════════════════════════════════════
+
+  /api/v1/contribution/me:
+    get:
+      tags: [contribution]
+      summary: 获取当前用户贡献统计
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserContribution' }
+
+  /api/v1/contribution/leaderboard:
+    get:
+      tags: [contribution]
+      summary: 获取贡献排行榜
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: period
+          schema:
+            type: string
+            enum: [weekly, monthly, all_time]
+            default: weekly
+        - in: query
+          name: limit
+          schema: { type: integer, default: 10 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  period: { type: string }
+                  leaderboard:
+                    type: array
+                    items: { $ref: '#/components/schemas/LeaderboardEntry' }
+
+  # ════════════════════════════════════════════════════
+  # BUTLER（AI 管家）
+  # ════════════════════════════════════════════════════
+
+  /api/v1/butler/digest:
+    post:
+      tags: [butler]
+      summary: 手动触发每周快报生成
+      description: 管理员可手动触发快报生成并推送到指定群
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [room_id]
+              properties:
+                room_id: { type: string, description: 目标群组 ID }
+                from_date: { type: string, format: date }
+                to_date: { type: string, format: date }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WeeklyDigest' }
+        '403':
+          description: 非管理员
+
+  /api/v1/butler/health:
+    get:
+      tags: [butler]
+      summary: 获取知识库健康报告
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthReport' }
+
+  /api/v1/butler/tasks:
+    get:
+      tags: [butler]
+      summary: 获取管家任务列表
+      description: 管理员查看管家任务执行历史
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: task_type
+          schema: { type: string }
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ButlerTask' }
+        '403':
+          description: 非管理员
+
+  /api/v1/butler/experience:
+    get:
+      tags: [butler]
+      summary: 获取管家经验知识库
+      description: 管理员查看管家学习到的经验
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: category
+          schema: { type: string }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ButlerExperience' }
+        '403':
+          description: 非管理员
+
+security:
+  - cookieAuth: []
