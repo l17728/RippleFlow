@@ -1109,41 +1109,51 @@ P2 - 一般 (1天内响应):
 
 ### 17.2 策略与机制分离
 
-| 维度 | 知识平台（机制） | AI管家Agent（策略） |
-|------|-----------------|---------------------|
+| 维度 | RippleFlow 平台（机制） | nullclaw Agent（策略） |
+|------|------------------------|------------------------|
 | **职责** | 提供能力和数据 | 决定何时如何使用能力 |
 | **变更频率** | 低（基础设施稳定） | 高（策略持续优化） |
-| **实现方式** | 固定代码、API | 规则引擎 + LLM智能 |
+| **实现方式** | 固定代码、API、CLI | Routine 脚本 + LLM智能 |
 | **演化方式** | 版本发布 | 自省学习、在线优化 |
 | **关注点** | 正确性、性能、可靠性 | 效果、体验、智能化 |
 
-### 17.3 知识平台职责
+**关键变化**：所有策略逻辑（规则引擎、Routine 脚本）由 nullclaw 提供，RippleFlow 平台只负责暴露能力。
 
-知识平台是**机制与数据的载体**，提供稳定的能力暴露：
+### 17.3 RippleFlow 平台职责
+
+RippleFlow 平台是**机制与数据的载体**，只负责暴露能力，不包含任何策略逻辑：
 
 | 层次 | 职责 | 暴露方式 |
 |------|------|----------|
 | **消息收集层** | 接收群聊消息、消息队列、原始存储 | Webhook、API |
-| **知识存储层** | 结构化存储、知识图谱、关联关系 | CRUD API |
-| **索引检索层** | 全文索引、全局索引、图谱查询 | Search API、Query API |
-| **行为分析层** | 用户行为记录、模式挖掘、偏好学习 | Analytics API |
-| **统计分析层** | 贡献统计、质量评估、健康报告 | Stats API |
+| **知识存储层** | 结构化存储、知识图谱、关联关系 | CRUD API、CLI |
+| **索引检索层** | 全文索引、全局索引、图谱查询 | Search API、CLI |
+| **行为分析层** | 用户行为记录、模式挖掘、偏好学习 | Analytics API、CLI |
+| **统计分析层** | 贡献统计、质量评估、健康报告 | Stats API、CLI |
 | **缓存层** | 热数据缓存、会话状态、临时数据 | Cache API |
 
-### 17.4 AI管家Agent职责
+**平台不包含**：
+- ❌ 规则引擎
+- ❌ Routine 脚本
+- ❌ 策略决策逻辑
+- ❌ 定时任务（由 nullclaw 调度）
 
-AI管家Agent是**独立的智能体**，通过调用平台能力来运维系统：
+### 17.4 nullclaw Agent 职责
+
+nullclaw 是**独立的智能体**，负责所有策略逻辑：
 
 #### 17.4.1 Agent 架构
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      AI 管家 Agent                              │
+│                    nullclaw Agent                                │
 │                                                                 │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │                     感知模块                               │  │
 │  │                                                           │  │
 │  │  监听平台事件 → 理解当前状态 → 识别行动机会               │  │
+│  │                                                           │  │
+│  │  通过 CLI 查询：rf help, rf <command> --help              │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │                              │                                  │
 │                              ▼                                  │
@@ -1151,7 +1161,7 @@ AI管家Agent是**独立的智能体**，通过调用平台能力来运维系统
 │  │                     决策模块                               │  │
 │  │                                                           │  │
 │  │  ┌───────────────┐     ┌───────────────┐                  │  │
-│  │  │ 规则引擎      │     │ LLM 智能层    │                  │  │
+│  │  │ Routine 脚本  │     │ LLM 智能层    │                  │  │
 │  │  │               │     │               │                  │  │
 │  │  │ 固化逻辑：    │     │ 智能决策：    │                  │  │
 │  │  │ • 状态机转换  │ ──→ │ • 意图理解    │                  │  │
@@ -4885,6 +4895,612 @@ autoscaling:
     ├── 阶段3: 实现动态伸缩
     │
     └── 多实例 (未来)
+```
+
+---
+
+## 31. CLI 命令规范（能力暴露层）
+
+### 31.1 设计理念
+
+**核心理念**：将系统所有能力通过 CLI 命令暴露，nullclaw 可以通过 `rf help` 查询命令，然后自动编排调用。
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    能力暴露架构                                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                   RippleFlow 平台                        │   │
+│  │                                                         │   │
+│  │  暴露方式：                                              │   │
+│  │  ├── REST API（HTTP 接口）                              │   │
+│  │  └── CLI 命令（Shell 接口）← nullclaw 调用              │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                              ↑                                  │
+│                              │ rf help / rf <command>           │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                   nullclaw                               │   │
+│  │                                                         │   │
+│  │  工作流程：                                              │   │
+│  │  1. rf help → 查询可用命令                              │   │
+│  │  2. rf <command> --help → 查询命令详情                  │   │
+│  │  3. rf <command> [args] → 执行操作                      │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 31.2 命令结构
+
+```
+rf <resource> <action> [options]
+
+资源(resource)：threads, search, todos, sensitive, notifications, ...
+动作(action)：list, get, create, update, delete, ...
+选项(options)：--filter, --output, --format, ...
+```
+
+### 31.3 全局选项
+
+```
+--help, -h          显示帮助信息
+--output, -o        输出格式：json | table | yaml（默认 table）
+--quiet, -q         静默模式，只输出结果
+--verbose, -v       详细输出，包含调试信息
+--config, -c        指定配置文件路径
+--profile, -p       指定环境配置（dev | prod）
+```
+
+### 31.4 命令索引
+
+| 命令组 | 说明 | 示例 |
+|--------|------|------|
+| `rf auth` | 认证与会话 | `rf auth login`, `rf auth whoami` |
+| `rf threads` | 话题线索 | `rf threads list`, `rf threads search` |
+| `rf search` | 搜索与问答 | `rf search "Redis配置"` |
+| `rf qa` | 智能问答 | `rf qa "如何配置连接池"` |
+| `rf todos` | 个人待办 | `rf todos list`, `rf todos add` |
+| `rf actions` | 任务待办（群聊） | `rf actions list`, `rf actions confirm` |
+| `rf sensitive` | 敏感授权 | `rf sensitive pending`, `rf sensitive decide` |
+| `rf reference` | 参考信息 | `rf reference list`, `rf reference get` |
+| `rf notifications` | 通知管理 | `rf notifications list`, `rf notifications read` |
+| `rf subscriptions` | 订阅管理 | `rf subscriptions add`, `rf subscriptions list` |
+| `rf contribution` | 贡献统计 | `rf contribution me`, `rf contribution leaderboard` |
+| `rf collaboration` | 协作网络 | `rf collaboration network`, `rf collaboration experts` |
+| `rf files` | 文件系统 | `rf files list`, `rf files get` |
+| `rf import` | 消息导入 | `rf import wechat`, `rf import status` |
+| `rf admin` | 管理操作 | `rf admin whitelist`, `rf admin categories` |
+| `rf butler` | AI 管家 | `rf butler digest`, `rf butler health` |
+
+### 31.5 详细命令定义
+
+#### 31.5.1 认证命令 (rf auth)
+
+```
+rf auth login [--sso]
+  登录系统
+  --sso    使用 SSO 登录（默认）
+
+rf auth logout
+  登出系统
+
+rf auth whoami
+  显示当前用户信息
+
+rf auth status
+  显示登录状态
+```
+
+#### 31.5.2 话题命令 (rf threads)
+
+```
+rf threads list [options]
+  列出话题线索
+  --category <cat>    按类别过滤（tech_decision, qa_faq, ...）
+  --domain <domain>   按四大类过滤（knowledge, action, event, collaboration）
+  --status <status>   按状态过滤（active, resolved, archived）
+  --room <room_id>    按群组过滤
+  --from <date>       起始日期
+  --to <date>         结束日期
+  --page <n>          页码（默认 1）
+  --size <n>          每页数量（默认 20）
+
+rf threads get <thread_id>
+  获取话题详情
+
+rf threads search <query> [options]
+  搜索话题
+  --category <cat>    限定类别
+  --domain <domain>   限定四大类
+  --ignore-window     忽略时间窗口
+
+rf threads summary <thread_id> [options]
+  查看/修改话题摘要
+  --modify            修改摘要模式
+  --content <text>    新摘要内容（修改时必填）
+  --reason <text>     修改原因
+
+rf threads history <thread_id>
+  查看摘要历史版本
+
+rf threads modifications <thread_id>
+  查看修改记录
+```
+
+#### 31.5.3 搜索问答命令 (rf search, rf qa)
+
+```
+rf search <query> [options]
+  全文搜索
+  --category <cat>    限定类别
+  --domain <domain>   限定四大类
+  --from <date>       起始日期
+  --to <date>         结束日期
+  --size <n>          结果数量（默认 10）
+
+rf qa <question> [options]
+  智能问答
+  --category <cat>    限定类别
+  --ignore-window     忽略时间窗口
+
+rf qa feedback <thread_id> [options]
+  提交问答反馈
+  --helpful <yes|no>  是否有帮助
+  --rating <1-5>      评分
+  --comment <text>    备注
+```
+
+#### 31.5.4 待办命令 (rf todos, rf actions)
+
+```
+rf todos list [options]
+  列出个人待办
+  --status <status>   按状态过滤（open, done）
+  --due-before <date> 截止日期之前
+  --overdue           仅显示过期
+  --include-collab    包含作为协作者的待办
+
+rf todos add <title> [options]
+  创建个人待办
+  --description <text> 描述
+  --due <date>         截止日期
+  --priority <level>   优先级（high, medium, low）
+  --tags <tags>        标签（逗号分隔）
+  --collaborators <ids> 协作者（逗号分隔）
+
+rf todos get <todo_id>
+  获取待办详情
+
+rf todos update <todo_id> [options]
+  更新待办
+  --title <text>       标题
+  --description <text> 描述
+  --due <date>         截止日期
+  --priority <level>   优先级
+  --tags <tags>        标签
+
+rf todos complete <todo_id> [options]
+  标记完成
+  --note <text>        完成备注
+
+rf todos reopen <todo_id>
+  重新打开
+
+rf todos delete <todo_id>
+  删除待办
+
+rf todos stats
+  待办统计
+
+--- 群聊任务待办 ---
+
+rf actions list [options]
+  列出群聊任务
+  --assignee <user>   按负责人过滤
+  --status <status>   按状态过滤
+
+rf actions confirm <id> [options]
+  确认隐性承诺
+  --assignee <user>   指派给谁
+  --due <date>        截止时间
+  --note <text>       备注
+
+rf actions dismiss <id> [options]
+  忽略隐性承诺
+  --reason <text>     忽略原因
+```
+
+#### 31.5.5 敏感授权命令 (rf sensitive)
+
+```
+rf sensitive pending [options]
+  列出待授权内容
+  --room <room_id>    按群组过滤
+
+rf sensitive get <auth_id>
+  获取授权详情
+
+rf sensitive decide <auth_id> [options]
+  提交决策
+  --decision <decision> 决策（approve | reject | desensitize）
+  --note <text>         备注
+  --desensitized <text> 脱敏内容（desensitize 时必填）
+
+rf sensitive nudge <auth_id>
+  提醒当事人处理
+
+rf sensitive batch-authorize [options]
+  批量授权
+  --ids <ids>         授权 ID 列表（逗号分隔）
+  --decision <decision> 决策
+```
+
+#### 31.5.6 参考信息命令 (rf reference)
+
+```
+rf reference list [options]
+  列出参考信息
+  --env <env>         环境过滤（dev, test, prod）
+  --keyword <kw>      关键词搜索
+
+rf reference get <item_id>
+  获取参考信息详情
+
+rf reference deprecate <item_id> [options]
+  标记废弃
+  --reason <text>     废弃原因
+```
+
+#### 31.5.7 通知命令 (rf notifications)
+
+```
+rf notifications list [options]
+  列出通知
+  --unread            仅显示未读
+
+rf notifications read <notification_id>
+  标记已读
+
+rf notifications read-all
+  全部标记已读
+
+rf notifications poll [options]
+  轮询新通知
+  --since <timestamp> 上次检查时间
+```
+
+#### 31.5.8 订阅命令 (rf subscriptions)
+
+```
+rf subscriptions list [options]
+  列出我的订阅
+  --type <type>       订阅类型（thread, category, keyword, user）
+
+rf subscriptions add [options]
+  添加订阅
+  --type <type>       订阅类型
+  --target <id>       订阅目标
+  --notify <method>   通知方式（in_app, email）
+
+rf subscriptions remove <subscription_id>
+  取消订阅
+
+rf subscriptions trending [options]
+  热门订阅
+  --type <type>       订阅类型
+  --limit <n>         数量限制
+```
+
+#### 31.5.9 贡献统计命令 (rf contribution)
+
+```
+rf contribution me [options]
+  我的贡献统计
+  --period <period>   统计周期（week, month, year）
+
+rf contribution leaderboard [options]
+  贡献排行
+  --period <period>   统计周期
+  --limit <n>         数量限制
+```
+
+#### 31.5.10 协作网络命令 (rf collaboration)
+
+```
+rf collaboration network [options]
+  协作网络图谱
+  --room <room_id>    限定群组
+  --from <date>       起始日期
+  --to <date>         结束日期
+  --min-weight <n>    最小关系权重
+
+rf collaboration experts [options]
+  领域专家
+  --domain <domain>   知识领域
+  --category <cat>    二级分类
+  --limit <n>         数量限制
+
+rf collaboration user-stats <user_id> [options]
+  用户协作统计
+```
+
+#### 31.5.11 文件系统命令 (rf files)
+
+```
+rf files list [options]
+  列出文件
+  --layer <layer>     层级（L1, L2, L3）
+  --search <query>    搜索内容
+
+rf files get <file_path> [options]
+  获取文件内容
+  --prefer <type>     优先返回（summary | original）
+
+rf files context [options]
+  获取上下文文件列表
+  --query <query>     查询内容
+  --layer <layer>     指定层级
+
+rf files compact [options]
+  手动压缩
+  --thread <id>       指定话题
+  --force             强制压缩
+```
+
+#### 31.5.12 消息导入命令 (rf import)
+
+```
+rf import wechat [options]
+  微信消息导入
+  --file <path>       导入文件
+  --room <room_id>    目标群组
+  --format <format>   文件格式
+  --reprocess         重新处理已存在消息
+
+rf import status [options]
+  导入任务状态
+  --job <job_id>      任务 ID
+
+rf import formats
+  支持的导入格式
+```
+
+#### 31.5.13 管理命令 (rf admin)
+
+```
+rf admin whitelist list [options]
+  列出白名单
+  --active            仅显示激活用户
+
+rf admin whitelist add <user_id> [options]
+  添加白名单
+  --name <name>       显示名称
+  --email <email>     邮箱
+  --role <role>       角色（member, admin）
+
+rf admin whitelist update <user_id> [options]
+  更新白名单
+  --role <role>       角色
+  --active <yes|no>   激活状态
+
+rf admin whitelist remove <user_id>
+  移除白名单
+
+rf admin categories list
+  列出信息类别
+
+rf admin categories add [options]
+  新增类别
+  --code <code>       类别代码
+  --name <name>       显示名称
+  --triggers <hints>  触发提示（逗号分隔）
+
+rf admin sensitive escalate [options]
+  敏感授权升级
+  --days <n>          超过 N 天未处理（默认 7）
+
+rf admin cleanup [options]
+  数据清理
+  --dry-run           仅预览，不执行
+```
+
+#### 31.5.14 AI 管家命令 (rf butler)
+
+```
+rf butler digest [options]
+  生成并推送快报
+  --room <room_id>    目标群组
+  --type <type>       快报类型（daily, weekly）
+
+rf butler health
+  系统健康报告
+
+rf butler tasks [options]
+  管家任务历史
+  --status <status>   状态过滤
+  --limit <n>         数量限制
+
+rf butler experience [options]
+  管家经验库
+  --category <cat>    类别过滤
+
+rf butler proposals [options]
+  L3 权限提案
+  --status <status>   状态过滤
+
+rf butler approve <proposal_id> [options]
+  批准提案
+  --note <text>       审批备注
+
+rf butler reject <proposal_id> [options]
+  拒绝提案
+  --reason <text>     拒绝原因
+```
+
+### 31.6 Help 系统
+
+#### 31.6.1 顶层帮助
+
+```
+$ rf help
+
+RippleFlow 群聊知识库系统
+
+用法: rf <command> [subcommand] [options]
+
+命令:
+  auth          认证与会话
+  threads       话题线索管理
+  search        全文搜索
+  qa            智能问答
+  todos         个人待办管理
+  actions       群聊任务管理
+  sensitive     敏感授权处理
+  reference     参考信息查看
+  notifications 通知管理
+  subscriptions 订阅管理
+  contribution  贡献统计
+  collaboration 协作网络
+  files         文件系统
+  import        消息导入
+  admin         管理操作
+  butler        AI 管家服务
+
+全局选项:
+  --help, -h     显示帮助
+  --output, -o   输出格式 (json|table|yaml)
+  --quiet, -q    静默模式
+  --verbose, -v  详细输出
+
+使用 "rf <command> --help" 查看命令详情
+使用 "rf <command> <subcommand> --help" 查看子命令详情
+```
+
+#### 31.6.2 命令帮助
+
+```
+$ rf threads list --help
+
+rf threads list - 列出话题线索
+
+用法:
+  rf threads list [options]
+
+选项:
+  --category <cat>    按类别过滤
+                      可选值: tech_decision, qa_faq, bug_incident,
+                              reference_data, action_item, discussion_notes,
+                              knowledge_share, env_config, project_update
+
+  --domain <domain>   按四大类过滤
+                      可选值: knowledge, action, event, collaboration
+
+  --status <status>   按状态过滤
+                      可选值: active, resolved, archived, merged
+
+  --room <room_id>    按群组过滤
+
+  --from <date>       起始日期 (格式: YYYY-MM-DD)
+
+  --to <date>         结束日期 (格式: YYYY-MM-DD)
+
+  --page <n>          页码 (默认: 1)
+
+  --size <n>          每页数量 (默认: 20, 最大: 100)
+
+示例:
+  rf threads list
+  rf threads list --category qa_faq --size 50
+  rf threads list --domain knowledge --from 2026-01-01
+  rf threads list --status active -o json
+```
+
+### 31.7 nullclaw 调用示例
+
+```bash
+# nullclaw 查询帮助
+$ rf help
+
+# 查询具体命令
+$ rf threads search --help
+
+# 执行搜索
+$ rf threads search "Redis配置" --category qa_faq -o json
+
+# 创建待办
+$ rf todos add "完成部署文档" --due 2026-03-10 --priority high
+
+# 处理敏感授权
+$ rf sensitive pending -o json
+$ rf sensitive decide <auth_id> --decision approve
+
+# 生成日报
+$ rf butler digest --room <room_id> --type daily
+```
+
+### 31.8 CLI 与 API 对应关系
+
+| CLI 命令 | API 端点 | 说明 |
+|----------|----------|------|
+| `rf threads list` | `GET /api/v1/threads` | 列出话题 |
+| `rf threads get` | `GET /api/v1/threads/{id}` | 获取详情 |
+| `rf threads search` | `GET /api/v1/search` | 搜索 |
+| `rf qa` | `POST /api/v1/qa` | 问答 |
+| `rf todos list` | `GET /api/v1/todos` | 列出待办 |
+| `rf todos add` | `POST /api/v1/todos` | 创建待办 |
+| `rf sensitive pending` | `GET /api/v1/sensitive/pending` | 待授权列表 |
+| `rf sensitive decide` | `POST /api/v1/sensitive/{id}/decide` | 提交决策 |
+| ... | ... | ... |
+
+### 31.9 实现说明
+
+```python
+# CLI 实现结构
+rippleflow/
+├── cli/
+│   ├── __init__.py
+│   ├── main.py           # 入口，注册所有命令
+│   ├── auth.py           # 认证命令
+│   ├── threads.py        # 话题命令
+│   ├── search.py         # 搜索命令
+│   ├── todos.py          # 待办命令
+│   ├── sensitive.py      # 敏感命令
+│   ├── notifications.py  # 通知命令
+│   ├── admin.py          # 管理命令
+│   └── utils.py          # 工具函数
+└── ...
+
+# 使用 click 库实现
+import click
+
+@click.group()
+def rf():
+    """RippleFlow 群聊知识库系统"""
+    pass
+
+@rf.group()
+def threads():
+    """话题线索管理"""
+    pass
+
+@threads.command()
+@click.option('--category', help='按类别过滤')
+@click.option('--status', help='按状态过滤')
+@click.option('--page', default=1, help='页码')
+@click.option('--size', default=20, help='每页数量')
+@click.option('--output', '-o', type=click.Choice(['json', 'table', 'yaml']))
+def list(category, status, page, size, output):
+    """列出话题线索"""
+    # 调用 API 服务
+    result = api_client.get('/api/v1/threads', params={
+        'category': category,
+        'status': status,
+        'page': page,
+        'size': size
+    })
+    # 格式化输出
+    formatter.output(result, format=output)
 ```
 
 ---
