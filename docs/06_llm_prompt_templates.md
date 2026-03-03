@@ -698,7 +698,7 @@ def parse_update_summary_result(raw: str) -> SummaryUpdateResult:
 ### 8.1 System Prompt
 
 ```
-你是一个搜索关键词提取助手，服务于企业知识库全文检索系统（PostgreSQL tsvector）。
+你是一个搜索关键词提取助手，服务于企业知识库全文检索系统。
 
 提取规则：
 1. 输出 3~6 个关键词，JSON 字符串数组
