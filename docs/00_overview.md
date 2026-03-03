@@ -129,7 +129,7 @@ Agent 从「执行者」变成「运营者」
 | AI 管家 | 独立的智能运营角色，可主动发群推送提醒和快报 |
 | 认证 | 企业 LDAP + SSO，系统只做白名单管理 |
 | LLM | 公司内部部署模型，全中文场景优化 |
-| 存储 | PostgreSQL（无向量扩展），全文检索 + LLM 直接处理 |
+| 存储 | **SQLite（轻量）或 PostgreSQL（高并发）**，全文检索 + LLM 直接处理 |
 | 敏感信息 | 发布前需全部当事人明确授权，pending 状态 7 天后升级管理员 |
 | 检索策略 | 全文检索召回候选 + LLM 基于摘要综合回答（非语义向量检索） |
 | 时间窗口 | 默认 3 个月滑窗（技术决策、参考信息永久有效） |
@@ -141,7 +141,8 @@ Agent 从「执行者」变成「运营者」
 | 编号 | 文档 | 说明 | 用途 |
 |------|------|------|------|
 | 01 | [系统架构](./01_system_architecture.md) | 组件图、模块边界、数据流、技术栈 | SDD |
-| 02 | [数据库 DDL](./02_database_ddl.sql) | 完整 PostgreSQL 建表语句 | SDD / 开发 |
+| 02 | [数据库 DDL (PostgreSQL)](./02_database_ddl.sql) | 完整 PostgreSQL 建表语句 | SDD / 开发 |
+| 02b | [数据库 DDL (SQLite)](./02b_database_ddl_sqlite.sql) | 轻量级 SQLite 建表语句 | SDD / 开发 |
 | 03 | [API 规范](./03_api_reference.yaml) | OpenAPI 3.0，全部 RESTful 接口 | SDD / TDD / E2E |
 | 04 | [服务层接口](./04_service_interfaces.md) | Python Protocol 定义，供 UT mock | TDD |
 | 05 | [E2E 测试目录](./05_e2e_test_catalog.md) | 用例清单（函数调用式）+ Playwright 结构 | ST / E2E |
