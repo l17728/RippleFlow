@@ -1367,6 +1367,154 @@ test.describe('Butler API Tests', () => {
     const body = await response.json();
     expect(Array.isArray(body)).toBeTruthy();
   });
+
+  test('TC-BUT-006: 获取管家提案列表', async ({ request }) => {
+    const response = await request.get('/api/v1/butler/proposals?status=pending', {
+      headers: { 'Cookie': 'rf_token=admin_token' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.items).toBeInstanceOf(Array);
+  });
+
+  test('TC-BUT-007: 审批管家提案', async ({ request }) => {
+    const response = await request.post('/api/v1/butler/proposals/proposal-id/approve', {
+      headers: { 'Cookie': 'rf_token=admin_token' },
+      data: { comment: '同意执行' }
+    });
+    expect(response.status()).toBe(200);
+  });
+});
+```
+
+---
+
+### 模块 N：个人待办（TODOS）
+
+```typescript
+// e2e/tests/todos.spec.ts
+import { test, expect } from '@playwright/test';
+
+test.describe('Personal Todos API Tests', () => {
+
+  test('TC-TODO-001: 创建个人待办', async ({ request }) => {
+    const response = await request.post('/api/v1/todos', {
+      headers: { 'Cookie': 'rf_token=valid_token' },
+      data: {
+        title: '完成配置文档',
+        description: 'Redis 集群配置文档',
+        priority: 'high',
+        due_date: '2026-03-10',
+        visibility: 'followers'
+      }
+    });
+    expect(response.status()).toBe(201);
+    const body = await response.json();
+    expect(body.title).toBe('完成配置文档');
+    expect(body.status).toBe('pending');
+  });
+
+  test('TC-TODO-002: 获取待办列表', async ({ request }) => {
+    const response = await request.get('/api/v1/todos?status=pending', {
+      headers: { 'Cookie': 'rf_token=valid_token' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.items).toBeInstanceOf(Array);
+    expect(body.overdue_count).toBeDefined();
+  });
+
+  test('TC-TODO-003: 完成待办', async ({ request }) => {
+    const response = await request.post('/api/v1/todos/todo-id/complete', {
+      headers: { 'Cookie': 'rf_token=valid_token' },
+      data: { comment: '已完成配置' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.status).toBe('completed');
+  });
+
+  test('TC-TODO-004: 查看他人公开待办', async ({ request }) => {
+    const response = await request.get('/api/v1/todos/user/other_user_id', {
+      headers: { 'Cookie': 'rf_token=valid_token' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.items).toBeInstanceOf(Array);
+    expect(body.user_info).toBeDefined();
+  });
+
+  test('TC-TODO-005: 获取待办统计', async ({ request }) => {
+    const response = await request.get('/api/v1/todos/stats', {
+      headers: { 'Cookie': 'rf_token=valid_token' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.total).toBeDefined();
+    expect(body.overdue).toBeDefined();
+    expect(body.by_priority).toBeDefined();
+  });
+});
+```
+
+---
+
+### 模块 O：订阅/关注（SUBSCRIPTIONS）
+
+```typescript
+// e2e/tests/subscriptions.spec.ts
+import { test, expect } from '@playwright/test';
+
+test.describe('Subscriptions API Tests', () => {
+
+  test('TC-SUB-001: 关注用户', async ({ request }) => {
+    const response = await request.post('/api/v1/subscriptions', {
+      headers: { 'Cookie': 'rf_token=valid_token' },
+      data: {
+        subscription_type: 'user',
+        target_id: 'other_user_id',
+        notification_types: ['in_app']
+      }
+    });
+    expect(response.status()).toBe(201);
+    const body = await response.json();
+    expect(body.subscription_type).toBe('user');
+    expect(body.is_active).toBe(true);
+  });
+
+  test('TC-SUB-002: 获取订阅列表', async ({ request }) => {
+    const response = await request.get('/api/v1/subscriptions', {
+      headers: { 'Cookie': 'rf_token=valid_token' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.items).toBeInstanceOf(Array);
+  });
+
+  test('TC-SUB-003: 取消订阅', async ({ request }) => {
+    const response = await request.delete('/api/v1/subscriptions/subscription-id', {
+      headers: { 'Cookie': 'rf_token=valid_token' }
+    });
+    expect(response.status()).toBe(204);
+  });
+
+  test('TC-SUB-004: 检查订阅状态', async ({ request }) => {
+    const response = await request.get('/api/v1/subscriptions/check?subscription_type=user&target_id=other_user_id', {
+      headers: { 'Cookie': 'rf_token=valid_token' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.is_subscribed).toBeDefined();
+  });
+
+  test('TC-SUB-005: 获取热门订阅', async ({ request }) => {
+    const response = await request.get('/api/v1/subscriptions/trending?limit=10', {
+      headers: { 'Cookie': 'rf_token=valid_token' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(Array.isArray(body)).toBeTruthy();
+  });
 });
 ```
 
@@ -1547,3 +1695,354 @@ export const TEST_SENSITIVE = {
 | `sync-success-toast` | 同步成功提示 | /threads/:id |
 | `action-item-status-select` | 任务状态选择 | /action-items |
 | `action-item-status-updated-toast` | 状态更新成功 | /action-items |
+
+---
+
+### 模块 P：AI 管家（BUTLER）
+
+```typescript
+// e2e/tests/butler.spec.ts
+import { test, expect } from '@playwright/test';
+
+test.describe('Butler API Tests', () => {
+
+  test('TC-BUTLER-001: 手动触发每周快报', async ({ request }) => {
+    const response = await request.post('/api/v1/butler/digest', {
+      headers: { 'Cookie': 'rf_token=admin_token' },
+      data: {
+        room_id: 'room_dev_general'
+      }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.title).toContain('本周知识沉淀');
+    expect(body.hot_discussions).toBeInstanceOf(Array);
+  });
+
+  test('TC-BUTLER-002: 获取知识库健康报告', async ({ request }) => {
+    const response = await request.get('/api/v1/butler/health', {
+      headers: { 'Cookie': 'rf_token=valid_token' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.overall_score).toBeDefined();
+    expect(body.metrics).toBeDefined();
+    expect(body.metrics.knowledge_coverage).toBeDefined();
+    expect(body.metrics.qa_quality).toBeDefined();
+    expect(body.metrics.user_engagement).toBeDefined();
+    expect(body.metrics.freshness).toBeDefined();
+  });
+
+  test('TC-BUTLER-003: 获取管家任务列表', async ({ request }) => {
+    const response = await request.get('/api/v1/butler/tasks?limit=10', {
+      headers: { 'Cookie': 'rf_token=admin_token' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.items).toBeInstanceOf(Array);
+  });
+
+  test('TC-BUTLER-004: 获取管家经验知识库', async ({ request }) => {
+    const response = await request.get('/api/v1/butler/experience', {
+      headers: { 'Cookie': 'rf_token=admin_token' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(Array.isArray(body)).toBeTruthy();
+  });
+
+  test('TC-BUTLER-005: 获取管家提案列表', async ({ request }) => {
+    const response = await request.get('/api/v1/butler/proposals', {
+      headers: { 'Cookie': 'rf_token=admin_token' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.items).toBeInstanceOf(Array);
+  });
+
+  test('TC-BUTLER-006: 批准管家提案', async ({ request }) => {
+    const response = await request.post('/api/v1/butler/proposals/proposal-id/approve', {
+      headers: { 'Cookie': 'rf_token=admin_token' },
+      data: { comment: '同意执行' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.status).toBe('approved');
+  });
+
+  test('TC-BUTLER-007: 拒绝管家提案', async ({ request }) => {
+    const response = await request.post('/api/v1/butler/proposals/proposal-id/reject', {
+      headers: { 'Cookie': 'rf_token=admin_token' },
+      data: { reason: '风险过高' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.status).toBe('rejected');
+  });
+
+  test('TC-BUTLER-008: 审核管家汇报', async ({ request }) => {
+    const response = await request.post('/api/v1/butler/reports/task-id/review', {
+      headers: { 'Cookie': 'rf_token=admin_token' },
+      data: { status: 'normal', comment: '执行正常' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.review_status).toBe('normal');
+  });
+
+  test('TC-BUTLER-009: 非管理员无法触发快报', async ({ request }) => {
+    const response = await request.post('/api/v1/butler/digest', {
+      headers: { 'Cookie': 'rf_token=member_token' },
+      data: { room_id: 'room_dev_general' }
+    });
+    expect(response.status()).toBe(403);
+  });
+});
+```
+
+---
+
+### 模块 Q：问答反馈（FEEDBACK）
+
+```typescript
+// e2e/tests/feedback.spec.ts
+import { test, expect } from '@playwright/test';
+
+test.describe('Feedback API Tests', () => {
+
+  test('TC-FB-001: 提交正面反馈', async ({ request }) => {
+    const response = await request.post('/api/v1/feedback', {
+      headers: { 'Cookie': 'rf_token=valid_token' },
+      data: {
+        qa_session_id: 'session-uuid-1',
+        is_helpful: true
+      }
+    });
+    expect(response.status()).toBe(201);
+    const body = await response.json();
+    expect(body.is_helpful).toBe(true);
+  });
+
+  test('TC-FB-002: 提交负面反馈并填写原因', async ({ request }) => {
+    const response = await request.post('/api/v1/feedback', {
+      headers: { 'Cookie': 'rf_token=valid_token' },
+      data: {
+        qa_session_id: 'session-uuid-2',
+        is_helpful: false,
+        comment: '答案过于笼统，缺少具体步骤'
+      }
+    });
+    expect(response.status()).toBe(201);
+    const body = await response.json();
+    expect(body.is_helpful).toBe(false);
+    expect(body.comment).toBe('答案过于笼统，缺少具体步骤');
+  });
+
+  test('TC-FB-003: 获取反馈统计', async ({ request }) => {
+    const response = await request.get('/api/v1/feedback/stats?period=weekly', {
+      headers: { 'Cookie': 'rf_token=admin_token' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.total_feedback).toBeDefined();
+    expect(body.helpful_rate).toBeDefined();
+    expect(body.avg_rating).toBeDefined();
+  });
+
+  test('TC-FB-004: 获取低分答案列表', async ({ request }) => {
+    const response = await request.get('/api/v1/feedback/low-rated?limit=10', {
+      headers: { 'Cookie': 'rf_token=admin_token' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.items).toBeInstanceOf(Array);
+  });
+
+  test('TC-FB-005: 对同一问答重复反馈', async ({ request }) => {
+    // 第一次提交
+    await request.post('/api/v1/feedback', {
+      headers: { 'Cookie': 'rf_token=valid_token' },
+      data: { qa_session_id: 'session-uuid-3', is_helpful: true }
+    });
+
+    // 第二次提交同一问答
+    const response = await request.post('/api/v1/feedback', {
+      headers: { 'Cookie': 'rf_token=valid_token' },
+      data: { qa_session_id: 'session-uuid-3', is_helpful: false }
+    });
+    expect(response.status()).toBe(409); // 已存在
+  });
+});
+```
+
+---
+
+### 模块 R：个人贡献统计（CONTRIBUTION）
+
+```typescript
+// e2e/tests/contribution.spec.ts
+import { test, expect } from '@playwright/test';
+
+test.describe('Contribution API Tests', () => {
+
+  test('TC-CONTRIB-001: 获取个人贡献统计', async ({ request }) => {
+    const response = await request.get('/api/v1/contribution/me', {
+      headers: { 'Cookie': 'rf_token=valid_token' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.threads_participated).toBeDefined();
+    expect(body.messages_count).toBeDefined();
+    expect(body.summaries_edited).toBeDefined();
+    expect(body.decisions_made).toBeDefined();
+    expect(body.questions_asked).toBeDefined();
+    expect(body.answers_viewed).toBeDefined();
+    expect(body.feedback_submitted).toBeDefined();
+  });
+
+  test('TC-CONTRIB-002: 获取某用户公开贡献', async ({ request }) => {
+    const response = await request.get('/api/v1/contribution/user/other_user_id', {
+      headers: { 'Cookie': 'rf_token=valid_token' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.user_id).toBe('other_user_id');
+    expect(body.display_name).toBeDefined();
+    expect(body.threads_participated).toBeDefined();
+  });
+
+  test('TC-CONTRIB-003: 获取贡献排行榜', async ({ request }) => {
+    const response = await request.get('/api/v1/contribution/leaderboard?period=weekly&limit=10', {
+      headers: { 'Cookie': 'rf_token=valid_token' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.period).toBe('weekly');
+    expect(body.leaderboard).toBeInstanceOf(Array);
+    expect(body.leaderboard.length).toBeLessThanOrEqual(10);
+  });
+
+  test('TC-CONTRIB-004: 获取月度排行榜', async ({ request }) => {
+    const response = await request.get('/api/v1/contribution/leaderboard?period=monthly', {
+      headers: { 'Cookie': 'rf_token=valid_token' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.period).toBe('monthly');
+  });
+
+  test('TC-CONTRIB-005: 获取全部时间排行榜', async ({ request }) => {
+    const response = await request.get('/api/v1/contribution/leaderboard?period=all_time', {
+      headers: { 'Cookie': 'rf_token=valid_token' }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.period).toBe('all_time');
+  });
+});
+```
+
+---
+
+### 模块 S：批量操作（BATCH）
+
+```typescript
+// e2e/tests/batch.spec.ts
+import { test, expect } from '@playwright/test';
+
+test.describe('Batch Operations API Tests', () => {
+
+  test('TC-BATCH-001: 批量授权敏感内容', async ({ request }) => {
+    const response = await request.post('/api/v1/sensitive/batch-authorize', {
+      headers: { 'Cookie': 'rf_token=valid_token' },
+      data: {
+        auth_ids: ['auth-uuid-1', 'auth-uuid-2'],
+        decision: 'authorize'
+      }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.success_count).toBe(2);
+    expect(body.failed_items).toBeInstanceOf(Array);
+  });
+
+  test('TC-BATCH-002: 批量拒绝敏感内容', async ({ request }) => {
+    const response = await request.post('/api/v1/sensitive/batch-authorize', {
+      headers: { 'Cookie': 'rf_token=valid_token' },
+      data: {
+        auth_ids: ['auth-uuid-3', 'auth-uuid-4'],
+        decision: 'reject'
+      }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.success_count).toBeDefined();
+  });
+
+  test('TC-BATCH-003: 批量标记通知已读', async ({ request }) => {
+    const response = await request.post('/api/v1/notifications/mark-read', {
+      headers: { 'Cookie': 'rf_token=valid_token' },
+      data: {
+        notification_ids: ['notif-uuid-1', 'notif-uuid-2', 'notif-uuid-3']
+      }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.updated_count).toBe(3);
+  });
+
+  test('TC-BATCH-004: 批量授权部分失败', async ({ request }) => {
+    const response = await request.post('/api/v1/sensitive/batch-authorize', {
+      headers: { 'Cookie': 'rf_token=valid_token' },
+      data: {
+        auth_ids: ['auth-valid-1', 'auth-not-yours', 'auth-valid-2'],
+        decision: 'authorize'
+      }
+    });
+    expect(response.status()).toBe(200);
+    const body = await response.json();
+    expect(body.success_count).toBe(2);
+    expect(body.failed_items.length).toBe(1);
+    expect(body.failed_items[0].reason).toContain('非当事人');
+  });
+});
+```
+
+---
+
+## Part 5：用户手册场景映射
+
+> 本节建立 E2E 测试用例与用户手册 Use Case 的映射关系。
+
+| 用户手册 Use Case | 对应 E2E 测试用例 | 覆盖状态 |
+|------------------|-------------------|----------|
+| 4.1 新成员快速融入 | TC-QA-001, TC-QA-002 | ✅ 已覆盖 |
+| 4.2 技术问题快速解答 | TC-QA-001, TC-SEARCH-001 | ✅ 已覆盖 |
+| 4.3 参考信息快速查找 | TC-REF-001, TC-REF-002, TC-REF-003 | ✅ 已覆盖 |
+| 4.4 会议讨论自动纪要 | TC-SUM-001, TC-SUM-002 | ✅ 已覆盖 |
+| 4.5 敏感内容授权处理 | TC-SENS-001 ~ TC-SENS-005 | ✅ 已覆盖 |
+| 4.6 当事人修正摘要 | TC-THR-003, TC-THR-004 | ✅ 已覆盖 |
+| 4.7 个人待办管理 | TC-TODO-001 ~ TC-TODO-005 | ✅ 已覆盖 |
+| 4.8 管理员系统配置 | TC-ADMIN-001 ~ TC-ADMIN-006 | ✅ 已覆盖 |
+| 4.9 AI 管家每周快报 | TC-BUTLER-001 ~ TC-BUTLER-009 | ✅ 已覆盖 |
+| 4.10 问答反馈 | TC-FB-001 ~ TC-FB-005 | ✅ 已覆盖 |
+| 4.11 个人贡献统计 | TC-CONTRIB-001 ~ TC-CONTRIB-005 | ✅ 已覆盖 |
+
+---
+
+## Part 6：测试环境配置
+
+```yaml
+# e2e/playwright.config.ts 环境变量
+env:
+  APP_URL: http://localhost:8000
+  TEST_DB_HOST: localhost
+  TEST_DB_NAME: rippleflow_test
+  TEST_REDIS_URL: redis://localhost:6379/15
+  LLM_MOCK_ENABLED: true
+  CHAT_TOOL_MOCK_ENABLED: true
+```
+
+---
+
+**END OF E2E TEST CATALOG**

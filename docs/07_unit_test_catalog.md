@@ -1833,7 +1833,259 @@ async def test_update_butler_experience():
 
 ---
 
-## 16. 附录：测试用例索引
+## 17. SubscriptionService
+
+这组测试覆盖 `services/subscription_service.py`，负责订阅/关注管理。
+
+### TC-SUB-01：subscribe 创建订阅
+
+```python
+# tests/unit/services/test_subscription_service.py
+import pytest
+from unittest.mock import AsyncMock
+
+pytestmark = pytest.mark.asyncio
+
+
+async def test_subscribe():
+    from rippleflow.services.subscription_service_impl import SubscriptionServiceImpl
+
+    mock_db = AsyncMock()
+    mock_db.execute.return_value = AsyncMock()
+
+    svc = SubscriptionServiceImpl(db=mock_db)
+    result = await svc.subscribe(
+        user_id="alice",
+        subscription_type="user",
+        target_id="bob",
+        notification_types=["in_app"],
+    )
+
+    assert result.user_id == "alice"
+    assert result.subscription_type == "user"
+```
+
+### TC-SUB-02：unsubscribe 取消订阅
+
+```python
+async def test_unsubscribe():
+    from rippleflow.services.subscription_service_impl import SubscriptionServiceImpl
+    from rippleflow.domain.exceptions import ForbiddenError
+
+    mock_db = AsyncMock()
+    mock_db.fetch_one.return_value = {"user_id": "alice"}  # 订阅属于 alice
+
+    svc = SubscriptionServiceImpl(db=mock_db)
+    await svc.unsubscribe(subscription_id="sub-123", user_id="alice")
+
+    mock_db.execute.assert_called_once()
+```
+
+### TC-SUB-03：get_subscribers 获取订阅者列表
+
+```python
+async def test_get_subscribers():
+    from rippleflow.services.subscription_service_impl import SubscriptionServiceImpl
+
+    mock_db = AsyncMock()
+    mock_db.fetch_all.return_value = [
+        {"user_id": "alice"},
+        {"user_id": "bob"},
+    ]
+
+    svc = SubscriptionServiceImpl(db=mock_db)
+    result = await svc.get_subscribers(
+        subscription_type="user",
+        target_id="charlie",
+    )
+
+    assert len(result) == 2
+    assert "alice" in result
+```
+
+### TC-SUB-04：publish_event 发布事件通知订阅者
+
+```python
+async def test_publish_event():
+    from rippleflow.services.subscription_service_impl import SubscriptionServiceImpl
+
+    mock_db = AsyncMock()
+    mock_db.fetch_all.return_value = [{"user_id": "alice"}, {"user_id": "bob"}]
+
+    mock_notify = AsyncMock()
+
+    svc = SubscriptionServiceImpl(db=mock_db, notify_svc=mock_notify)
+    result = await svc.publish_event(
+        event_type="user_todo_created",
+        actor_id="charlie",
+        target_type="user",
+        target_id="charlie",
+        payload={"todo_title": "完成文档"},
+    )
+
+    assert len(result) == 2
+```
+
+---
+
+## 18. PersonalTodoService
+
+这组测试覆盖 `services/personal_todo_service.py`，负责个人待办管理。
+
+### TC-TODO-01：create_todo 创建待办
+
+```python
+# tests/unit/services/test_personal_todo_service.py
+import pytest
+from unittest.mock import AsyncMock
+from datetime import date
+
+pytestmark = pytest.mark.asyncio
+
+
+async def test_create_todo():
+    from rippleflow.services.personal_todo_service_impl import PersonalTodoServiceImpl
+
+    mock_db = AsyncMock()
+    mock_db.execute.return_value = AsyncMock()
+
+    svc = PersonalTodoServiceImpl(db=mock_db, notify_svc=AsyncMock())
+    result = await svc.create_todo(
+        user_id="alice",
+        title="完成配置文档",
+        priority="high",
+        due_date=date(2026, 3, 10),
+    )
+
+    assert result.title == "完成配置文档"
+    assert result.status == "pending"
+```
+
+### TC-TODO-02：create_from_group_message 从群聊消息创建待办
+
+```python
+async def test_create_from_group_message():
+    from rippleflow.services.personal_todo_service_impl import PersonalTodoServiceImpl
+
+    mock_db = AsyncMock()
+    mock_notify = AsyncMock()
+
+    svc = PersonalTodoServiceImpl(db=mock_db, notify_svc=mock_notify)
+    result = await svc.create_from_group_message(
+        message_id="msg-123",
+        room_id="room-dev",
+        extracted_task={
+            "title": "配置 Redis",
+            "assignees": [{"user_id": "alice", "role": "responsible"}],
+            "due_date": "2026-03-10",
+            "priority": "high",
+            "task_elements": {"resources": ["服务器"]},
+            "missing_elements": [],
+        },
+    )
+
+    assert len(result) == 1
+    assert result[0].title == "配置 Redis"
+```
+
+### TC-TODO-03：confirm_task_elements 确认任务要素
+
+```python
+async def test_confirm_task_elements():
+    from rippleflow.services.personal_todo_service_impl import PersonalTodoServiceImpl
+
+    mock_db = AsyncMock()
+    mock_db.fetch_one.return_value = {
+        "id": "todo-123",
+        "elements_status": "needs_confirmation",
+        "missing_elements": ["due_date", "resources"],
+    }
+    mock_db.execute.return_value = AsyncMock()
+
+    svc = PersonalTodoServiceImpl(db=mock_db)
+    result = await svc.confirm_task_elements(
+        todo_id="todo-123",
+        user_id="alice",
+        confirmed_elements={
+            "due_date": "2026-03-15",
+            "resources": ["服务器A", "服务器B"],
+        },
+    )
+
+    assert result.elements_status == "complete"
+```
+
+### TC-TODO-04：list_todos 获取待办列表
+
+```python
+async def test_list_todos():
+    from rippleflow.services.personal_todo_service_impl import PersonalTodoServiceImpl
+
+    mock_db = AsyncMock()
+    mock_db.fetch_all.return_value = [
+        {"id": "todo-1", "title": "任务1", "status": "pending"},
+        {"id": "todo-2", "title": "任务2", "status": "pending"},
+    ]
+    mock_db.fetch_one.return_value = {"total": 2, "overdue": 0}
+
+    svc = PersonalTodoServiceImpl(db=mock_db)
+    items, total, overdue = await svc.list_todos(user_id="alice", status="pending")
+
+    assert len(items) == 2
+    assert total == 2
+```
+
+### TC-TODO-05：complete_todo 完成待办
+
+```python
+async def test_complete_todo():
+    from rippleflow.services.personal_todo_service_impl import PersonalTodoServiceImpl
+
+    mock_db = AsyncMock()
+    mock_db.fetch_one.return_value = {
+        "id": "todo-123",
+        "user_id": "alice",
+        "status": "pending",
+    }
+    mock_db.execute.return_value = AsyncMock()
+
+    svc = PersonalTodoServiceImpl(db=mock_db, notify_svc=AsyncMock())
+    result = await svc.complete_todo(
+        todo_id="todo-123",
+        user_id="alice",
+        comment="已完成配置",
+    )
+
+    assert result.status == "completed"
+```
+
+### TC-TODO-06：get_stats 获取待办统计
+
+```python
+async def test_get_stats():
+    from rippleflow.services.personal_todo_service_impl import PersonalTodoServiceImpl
+
+    mock_db = AsyncMock()
+    mock_db.fetch_one.return_value = {
+        "total": 10,
+        "pending": 5,
+        "in_progress": 2,
+        "completed": 3,
+        "overdue": 1,
+        "due_today": 2,
+        "due_this_week": 4,
+    }
+
+    svc = PersonalTodoServiceImpl(db=mock_db)
+    result = await svc.get_stats(user_id="alice")
+
+    assert result.total == 10
+    assert result.overdue == 1
+```
+
+---
+
+## 19. 附录：测试用例索引
 
 | ID | 服务 | 方法 | 测试场景 | 覆盖业务规则 |
 |----|------|------|----------|-------------|
@@ -1906,3 +2158,13 @@ async def test_update_butler_experience():
 | TC-BUT-04 | AIButlerService | detect_orphan_threads | 返回孤儿线索 ID | 孤儿检测 |
 | TC-BUT-05 | AIButlerService | self_learning | 更新经验知识库 | 自主学习 |
 | TC-BUT-06 | AIButlerService | update_butler_experience | 置信度更新 | 经验累积 |
+| TC-SUB-01 | SubscriptionService | subscribe | 创建订阅 | 订阅管理 |
+| TC-SUB-02 | SubscriptionService | unsubscribe | 取消订阅 | 订阅管理 |
+| TC-SUB-03 | SubscriptionService | get_subscribers | 获取订阅者列表 | 订阅查询 |
+| TC-SUB-04 | SubscriptionService | publish_event | 发布事件通知订阅者 | 事件通知 |
+| TC-TODO-01 | PersonalTodoService | create_todo | 创建待办 | 待办管理 |
+| TC-TODO-02 | PersonalTodoService | create_from_group_message | 从群聊消息创建待办 | 任务识别 |
+| TC-TODO-03 | PersonalTodoService | confirm_task_elements | 确认任务要素 | 要素确认 |
+| TC-TODO-04 | PersonalTodoService | list_todos | 获取待办列表 | 待办查询 |
+| TC-TODO-05 | PersonalTodoService | complete_todo | 完成待办 | 状态更新 |
+| TC-TODO-06 | PersonalTodoService | get_stats | 获取待办统计 | 统计计算 |

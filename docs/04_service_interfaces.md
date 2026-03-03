@@ -1370,4 +1370,296 @@ AIButlerService
     ├── FeedbackService         (反馈分析)
     ├── ChatToolService         (群聊推送)
     └── AuthService             (权限验证)
+
+SubscriptionService
+    ├── NotificationService     (订阅事件通知)
+    └── AuthService             (用户验证)
+
+PersonalTodoService
+    ├── NotificationService     (待办提醒、协作者通知)
+    ├── SubscriptionService     (发布待办时通知关注者)
+    ├── ThreadService           (从 action_item 转换)
+    └── AuthService             (权限验证)
+```
+
+---
+
+## 14. SubscriptionService
+
+```python
+# rippleflow/services/interfaces/subscription_service.py
+from typing import Protocol
+from dataclasses import dataclass
+
+
+@dataclass
+class Subscription:
+    """订阅记录"""
+    id: str
+    user_id: str
+    subscription_type: str  # 'user' | 'thread' | 'category' | 'keyword'
+    target_id: str
+    target_name: str | None
+    notification_types: list[str]
+    is_active: bool
+    created_at: str
+    updated_at: str
+
+
+class ISubscriptionService(Protocol):
+    """
+    订阅/关注服务。
+    支持用户关注人、话题、类别、关键词，并在相关事件发生时推送通知。
+    """
+
+    async def subscribe(
+        self,
+        user_id: str,
+        subscription_type: str,
+        target_id: str,
+        notification_types: list[str] | None = None,
+    ) -> Subscription:
+        """创建订阅。"""
+        ...
+
+    async def unsubscribe(self, subscription_id: str, user_id: str) -> None:
+        """取消订阅。"""
+        ...
+
+    async def get_user_subscriptions(
+        self,
+        user_id: str,
+        subscription_type: str | None = None,
+    ) -> list[Subscription]:
+        """获取用户的订阅列表。"""
+        ...
+
+    async def get_subscribers(
+        self,
+        subscription_type: str,
+        target_id: str,
+    ) -> list[str]:
+        """获取某对象的订阅者列表。"""
+        ...
+
+    async def publish_event(
+        self,
+        event_type: str,
+        actor_id: str | None,
+        target_type: str,
+        target_id: str,
+        payload: dict | None = None,
+    ) -> list[str]:
+        """发布订阅事件，通知相关订阅者。"""
+        ...
+```
+
+---
+
+## 15. PersonalTodoService
+
+```python
+# rippleflow/services/interfaces/personal_todo_service.py
+from typing import Protocol
+from dataclasses import dataclass
+from datetime import date, time
+
+
+@dataclass
+class PersonalTodo:
+    """个人待办"""
+    id: str
+    user_id: str
+    title: str
+    description: str | None
+    status: str  # 'pending' | 'in_progress' | 'completed' | 'cancelled'
+    priority: str  # 'low' | 'medium' | 'high' | 'urgent'
+    due_date: date | None
+    due_time: time | None
+    visibility: str  # 'private' | 'followers' | 'team' | 'public'
+    tags: list[str]
+    category: str | None
+    reminder_enabled: bool
+    created_at: str
+    updated_at: str
+
+
+@dataclass
+class TodoStats:
+    """待办统计"""
+    total: int
+    pending: int
+    in_progress: int
+    completed: int
+    overdue: int
+    due_today: int
+    due_this_week: int
+
+
+class IPersonalTodoService(Protocol):
+    """
+    个人待办服务。
+    支持用户管理自己的待办事项，并可发布给关注者查看。
+    支持从群聊消息自动识别任务并创建待办。
+    """
+
+    async def create_todo(
+        self,
+        user_id: str,
+        title: str,
+        description: str | None = None,
+        priority: str = 'medium',
+        due_date: date | None = None,
+        visibility: str = 'private',
+        tags: list[str] | None = None,
+        participant_ids: list[dict] | None = None,
+        # [{"user_id": "alice", "role": "responsible"}, ...]
+        task_elements: dict | None = None,
+    ) -> PersonalTodo:
+        """创建待办事项。"""
+        ...
+
+    async def create_from_group_message(
+        self,
+        message_id: str,
+        room_id: str,
+        extracted_task: dict,
+    ) -> list[PersonalTodo]:
+        """
+        从群聊消息创建待办。
+        extracted_task 由 LLM 从消息中提取：
+        {
+            "title": "配置 Redis 集群",
+            "assignees": [{"user_id": "alice", "role": "responsible"}],
+            "due_date": "2026-03-10",
+            "priority": "high",
+            "task_elements": {
+                "resources": ["服务器"],
+                "dependencies": ["DBA审批"],
+                "deliverables": ["配置文档"]
+            },
+            "missing_elements": ["due_date", "resources"]
+        }
+        返回创建的待办列表（可能多条，每个责任人一条）。
+        """
+        ...
+
+    async def update_todo(self, todo_id: str, user_id: str, **updates) -> PersonalTodo:
+        """更新待办事项。"""
+        ...
+
+    async def delete_todo(self, todo_id: str, user_id: str) -> None:
+        """删除待办事项。"""
+        ...
+
+    async def list_todos(
+        self,
+        user_id: str,
+        status: str | None = None,
+        include_participated: bool = False,
+    ) -> tuple[list[PersonalTodo], int, int]:
+        """获取用户的待办列表。返回 (列表, 总数, 过期数)。"""
+        ...
+
+    async def complete_todo(
+        self,
+        todo_id: str,
+        user_id: str,
+        comment: str | None = None,
+    ) -> PersonalTodo:
+        """标记待办完成。"""
+        ...
+
+    async def confirm_task_elements(
+        self,
+        todo_id: str,
+        user_id: str,
+        confirmed_elements: dict,
+    ) -> PersonalTodo:
+        """
+        确认/补充任务要素。
+        用户对管家询问的缺失要素进行确认。
+        """
+        ...
+
+    async def get_todos_needing_confirmation(
+        self,
+        user_id: str,
+    ) -> list[PersonalTodo]:
+        """获取需要用户确认要素的待办列表。"""
+        ...
+
+    async def add_participant(
+        self,
+        todo_id: str,
+        user_id: str,
+        participant_user_id: str,
+        role: str = 'informed',
+    ) -> None:
+        """添加任务参与人。"""
+        ...
+
+    async def get_user_public_todos(
+        self,
+        viewer_id: str,
+        target_user_id: str,
+    ) -> tuple[list[PersonalTodo], int]:
+        """获取某用户的公开待办。"""
+        ...
+
+    async def get_stats(self, user_id: str) -> TodoStats:
+        """获取待办统计。"""
+        ...
+
+    async def check_reminders(self) -> list[dict]:
+        """检查需要提醒的待办。由 Celery Worker 定时调用。"""
+        ...
+
+    async def sync_from_action_item(
+        self,
+        thread_id: str,
+    ) -> list[PersonalTodo]:
+        """
+        从知识库中的 action_item 同步到个人待办。
+        当群聊中的 action_item 被识别后，自动为责任人创建待办。
+        """
+        ...
+```
+
+---
+
+## 16. 接口依赖关系图（更新）
+
+```
+ProcessingPipelineService
+    ├── MessageService
+    ├── LLMService
+    ├── ThreadService
+    ├── SensitiveService
+    └── NotificationService
+
+BotAdapterService
+    ├── LLMService
+    ├── SearchService
+    ├── ThreadService
+    ├── AuthService
+    └── ChatToolService
+
+AIButlerService
+    ├── LLMService
+    ├── ThreadService
+    ├── NotificationService
+    ├── FeedbackService
+    ├── PersonalTodoService      ← 新增
+    ├── SubscriptionService      ← 新增
+    └── AuthService
+
+SubscriptionService
+    ├── NotificationService
+    └── AuthService
+
+PersonalTodoService
+    ├── NotificationService
+    ├── SubscriptionService
+    └── AuthService
 ```

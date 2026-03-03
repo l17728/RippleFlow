@@ -645,6 +645,7 @@ CREATE TABLE butler_tasks (
     -- 'sensitive_status_update' | 'feedback_request'
     status          VARCHAR(50) NOT NULL DEFAULT 'pending',
     -- 'pending' | 'completed' | 'failed'
+    permission_level INT NOT NULL DEFAULT 0,    -- 权限层级 0-3
     scheduled_at    TIMESTAMPTZ NOT NULL,
     executed_at     TIMESTAMPTZ,
     target_room_id  UUID REFERENCES chat_rooms(id) ON DELETE SET NULL,
@@ -652,6 +653,7 @@ CREATE TABLE butler_tasks (
     payload         JSONB NOT NULL DEFAULT '{}',
     result          JSONB,
     error           TEXT,
+    report_reviewed BOOLEAN NOT NULL DEFAULT FALSE,  -- 汇报是否已审核
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -680,6 +682,34 @@ CREATE TABLE butler_experience (
 );
 
 CREATE INDEX idx_butler_experience_category ON butler_experience(category);
+
+-- =============================================================
+-- TABLE: butler_proposals
+-- AI 管家 L3 权限提案（需管理员审批）
+-- =============================================================
+
+CREATE TABLE butler_proposals (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    task_type       VARCHAR(100) NOT NULL,
+    -- 'modify_config' | 'access_sensitive' | 'high_freq_push' | 'custom_script'
+    reasoning       TEXT NOT NULL,               -- 发起原因
+    expected_impact TEXT NOT NULL,               -- 预期影响
+    risk_assessment TEXT,                        -- 风险评估
+    payload         JSONB NOT NULL DEFAULT '{}', -- 拟执行内容
+    status          VARCHAR(50) NOT NULL DEFAULT 'pending',
+    -- 'pending' | 'approved' | 'rejected' | 'executed' | 'cancelled'
+    proposed_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    reviewed_by     VARCHAR(255),                -- 审核人 ldap_user_id
+    reviewed_at     TIMESTAMPTZ,
+    review_comment  TEXT,
+    executed_at     TIMESTAMPTZ,
+    execution_result JSONB,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_butler_proposals_status ON butler_proposals(status)
+    WHERE status IN ('pending', 'approved');
+CREATE INDEX idx_butler_proposals_proposed ON butler_proposals(proposed_at DESC);
 
 -- =============================================================
 -- TABLE: user_contribution_stats
@@ -717,6 +747,157 @@ CREATE INDEX idx_contribution_weekly_rank ON user_contribution_stats(weekly_rank
     WHERE weekly_rank IS NOT NULL;
 CREATE INDEX idx_contribution_monthly_rank ON user_contribution_stats(monthly_rank)
     WHERE monthly_rank IS NOT NULL;
+
+-- =============================================================
+-- TABLE: user_subscriptions
+-- 用户订阅/关注记录
+-- =============================================================
+
+CREATE TABLE user_subscriptions (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id         VARCHAR(255) NOT NULL,          -- 订阅者 ldap_user_id
+    subscription_type VARCHAR(50) NOT NULL,         -- 'user' | 'thread' | 'category' | 'keyword'
+    target_id       VARCHAR(255) NOT NULL,          -- 被订阅对象 ID
+    -- user: ldap_user_id
+    -- thread: thread UUID
+    -- category: category code
+    -- keyword: 关键词文本
+    notification_types TEXT[] NOT NULL DEFAULT ARRAY['in_app'],
+    -- 'in_app' | 'email' | 'push' 的组合
+    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    UNIQUE(user_id, subscription_type, target_id)
+);
+
+CREATE INDEX idx_subscriptions_user ON user_subscriptions(user_id, is_active);
+CREATE INDEX idx_subscriptions_target ON user_subscriptions(subscription_type, target_id, is_active);
+CREATE INDEX idx_subscriptions_type ON user_subscriptions(subscription_type);
+
+-- =============================================================
+-- TABLE: personal_todos
+-- 个人待办事项（可从群聊 action_item 自动生成）
+-- =============================================================
+
+CREATE TABLE personal_todos (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id         VARCHAR(255) NOT NULL,          -- 责任人 ldap_user_id
+    title           VARCHAR(500) NOT NULL,          -- 待办标题
+    description     TEXT,                           -- 详细描述
+    status          VARCHAR(50) NOT NULL DEFAULT 'pending',
+    -- 'pending' | 'in_progress' | 'completed' | 'cancelled' | 'blocked'
+    priority        VARCHAR(20) NOT NULL DEFAULT 'medium',
+    -- 'low' | 'medium' | 'high' | 'urgent'
+    due_date        DATE,                           -- 截止日期
+    due_time        TIME,                           -- 截止时间（可选）
+    -- 可见性与发布
+    visibility      VARCHAR(20) NOT NULL DEFAULT 'private',
+    -- 'private' | 'followers' | 'team' | 'public'
+    published_at    TIMESTAMPTZ,                    -- 发布时间
+    -- 来源追踪
+    source_type     VARCHAR(50),                    -- 来源类型
+    -- 'manual' | 'group_task' | 'action_item' | 'meeting' | 'import'
+    source_id       UUID,                           -- 来源 ID（如 thread_id）
+    source_room_id  UUID REFERENCES chat_rooms(id) ON DELETE SET NULL, -- 来源群组
+    source_message_id UUID REFERENCES messages(id) ON DELETE SET NULL, -- 来源消息
+    -- 任务要素（从群聊提取或管家补充）
+    task_elements   JSONB NOT NULL DEFAULT '{}',
+    -- {
+    --   "resources": ["服务器", "测试环境"],
+    --   "dependencies": ["DBA审批"],
+    --   "deliverables": ["配置文档", "上线报告"],
+    --   "location": "会议室A",
+    --   "estimated_hours": 4,
+    --   "completion_criteria": "..."
+    -- }
+    elements_status VARCHAR(20) NOT NULL DEFAULT 'complete',
+    -- 'complete' | 'incomplete' | 'needs_confirmation'
+    missing_elements TEXT[],                        -- 缺失的要素列表
+    -- 标签与分类
+    tags            TEXT[] DEFAULT '{}',
+    category        VARCHAR(100),                   -- 用户自定义分类
+    -- 提醒设置
+    reminder_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    reminder_minutes_before INTEGER DEFAULT 30,
+    reminded_at     TIMESTAMPTZ,
+    -- 完成信息
+    completed_at    TIMESTAMPTZ,
+    completed_by    VARCHAR(255),                   -- 完成人（可代办）
+    completion_note TEXT,                           -- 完成备注
+    -- 审计
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_personal_todos_user ON personal_todos(user_id, status, due_date);
+CREATE INDEX idx_personal_todos_status ON personal_todos(status) WHERE status IN ('pending', 'in_progress', 'blocked');
+CREATE INDEX idx_personal_todos_due ON personal_todos(due_date) WHERE due_date IS NOT NULL AND status NOT IN ('completed', 'cancelled');
+CREATE INDEX idx_personal_todos_source ON personal_todos(source_type, source_id) WHERE source_id IS NOT NULL;
+CREATE INDEX idx_personal_todos_elements_status ON personal_todos(elements_status) WHERE elements_status = 'needs_confirmation';
+
+-- =============================================================
+-- TABLE: todo_participants
+-- 任务参与人（多人任务场景）
+-- =============================================================
+
+CREATE TABLE todo_participants (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    todo_id         UUID NOT NULL REFERENCES personal_todos(id) ON DELETE CASCADE,
+    user_id         VARCHAR(255) NOT NULL,          -- 参与人 ldap_user_id
+    role            VARCHAR(20) NOT NULL,           -- 'owner' | 'responsible' | 'consulted' | 'informed'
+    -- owner: 任务所有者（通常是责任人）
+    -- responsible: 执行者
+    -- consulted: 需咨询的人
+    -- informed: 需通知的人
+    can_edit        BOOLEAN NOT NULL DEFAULT FALSE, -- 是否可编辑
+    can_complete    BOOLEAN NOT NULL DEFAULT FALSE, -- 是否可标记完成
+    notified        BOOLEAN NOT NULL DEFAULT FALSE, -- 是否已通知
+    confirmed_at    TIMESTAMPTZ,                    -- 确认时间
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    UNIQUE(todo_id, user_id)
+);
+
+CREATE INDEX idx_todo_participants_user ON todo_participants(user_id);
+CREATE INDEX idx_todo_participants_todo ON todo_participants(todo_id);
+
+-- =============================================================
+-- TABLE: todo_history
+-- 待办历史记录（状态变更、编辑等）
+-- =============================================================
+
+CREATE TABLE todo_history (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    todo_id         UUID NOT NULL REFERENCES personal_todos(id) ON DELETE CASCADE,
+    action          VARCHAR(50) NOT NULL,           -- 'created' | 'updated' | 'status_changed' | 'completed' | 'commented'
+    old_value       JSONB,
+    new_value       JSONB,
+    changed_by      VARCHAR(255) NOT NULL,          -- 操作人
+    comment         TEXT,                           -- 备注
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_todo_history_todo ON todo_history(todo_id, created_at DESC);
+
+-- =============================================================
+-- TABLE: subscription_events
+-- 订阅事件日志（用于通知触发）
+-- =============================================================
+
+CREATE TABLE subscription_events (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    event_type      VARCHAR(100) NOT NULL,
+    -- 'thread_updated' | 'thread_new_message' | 'user_contribution' | 'category_new_thread'
+    actor_id        VARCHAR(255),                   -- 触发事件的用户
+    target_type     VARCHAR(50) NOT NULL,           -- 'thread' | 'user' | 'category'
+    target_id       VARCHAR(255) NOT NULL,          -- 目标对象 ID
+    payload         JSONB NOT NULL DEFAULT '{}',    -- 事件详情
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_subscription_events_target ON subscription_events(target_type, target_id, created_at DESC);
+CREATE INDEX idx_subscription_events_type ON subscription_events(event_type, created_at DESC);
 
 -- =============================================================
 -- TRIGGERS: updated_at 自动维护
@@ -776,6 +957,109 @@ CREATE TRIGGER trg_archive_summary
     FOR EACH ROW EXECUTE FUNCTION fn_archive_summary_on_update();
 
 -- =============================================================
+-- TABLE: butler_interaction_logs
+-- AI 管家交互日志（用于交互学习）
+-- =============================================================
+
+CREATE TABLE butler_interaction_logs (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    session_id      UUID,                           -- 会话 ID（可关联多个交互）
+    user_id         VARCHAR(255) NOT NULL,          -- 用户 ldap_user_id
+    interaction_type VARCHAR(100) NOT NULL,         -- 交互类型
+    -- 'query' | 'feedback' | 'preference_change' | 'correction' | 'recommendation_accept' | 'recommendation_reject'
+    input           JSONB NOT NULL,                 -- 用户输入
+    output          JSONB,                          -- 管家输出
+    context         JSONB DEFAULT '{}',             -- 上下文信息
+    -- {
+    --   "thread_ids": ["uuid1", "uuid2"],
+    --   "categories": ["tech_decision"],
+    --   "room_id": "uuid"
+    -- }
+    user_satisfaction INTEGER,                      -- 用户满意度 1-5
+    feedback_text   TEXT,                           -- 用户反馈文本
+    learned_pattern JSONB,                          -- 学习到的模式
+    -- {
+    --   "pattern_type": "preference",
+    --   "pattern_key": "preferred_reminder_time",
+    --   "pattern_value": "morning",
+    --   "confidence": 0.85
+    -- }
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_butler_interaction_user ON butler_interaction_logs(user_id, created_at DESC);
+CREATE INDEX idx_butler_interaction_type ON butler_interaction_logs(interaction_type);
+CREATE INDEX idx_butler_interaction_session ON butler_interaction_logs(session_id);
+CREATE INDEX idx_butler_interaction_satisfaction ON butler_interaction_logs(user_satisfaction) WHERE user_satisfaction IS NOT NULL;
+
+-- =============================================================
+-- TABLE: butler_reflections
+-- AI 管家自省记录
+-- =============================================================
+
+CREATE TABLE butler_reflections (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    reflection_type VARCHAR(50) NOT NULL,           -- 'daily' | 'weekly' | 'monthly'
+    period_start    DATE NOT NULL,
+    period_end      DATE NOT NULL,
+    summary         JSONB NOT NULL,                 -- 自省摘要
+    -- {
+    --   "tasks_executed": 45,
+    --   "success_rate": 0.92,
+    --   "user_satisfaction": 4.3,
+    --   "top_performed_duties": ["reminder", "digest"],
+    --   "under_performed_duties": ["recommendation"]
+    -- }
+    patterns        JSONB DEFAULT '[]',             -- 发现的模式
+    -- [
+    --   {"pattern": "技术决策通知打开率更高", "confidence": 0.85, "sample_size": 120}
+    -- ]
+    optimizations   JSONB DEFAULT '[]',             -- 优化建议
+    -- [
+    --   {"target": "duties/reminder.yaml", "change": "增加用户偏好检查", "reason": "减少投诉"}
+    -- ]
+    lessons_learned JSONB DEFAULT '[]',             -- 经验教训
+    -- [
+    --   {"lesson": "周末提醒打扰较多", "action": "建议增加免打扰设置", "priority": "medium"}
+    -- ]
+    prompt_updates  JSONB DEFAULT '[]',             -- 提示词更新记录
+    -- [
+    --   {"file": "skills/task_extraction.md", "version_before": "1.0", "version_after": "1.1", "reason": "提升任务识别准确率"}
+    -- ]
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    UNIQUE(reflection_type, period_start, period_end)
+);
+
+CREATE INDEX idx_butler_reflections_type ON butler_reflections(reflection_type, period_start DESC);
+
+-- =============================================================
+-- TABLE: butler_action_logs
+-- AI 管家操作审计日志（L1-L2 权限操作）
+-- =============================================================
+
+CREATE TABLE butler_action_logs (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    task_id         UUID REFERENCES butler_tasks(id) ON DELETE SET NULL,
+    permission_level INT NOT NULL,                  -- 0-3，对应 L0-L3
+    action_type     VARCHAR(100) NOT NULL,          -- 操作类型
+    -- 'send_notification' | 'create_todo' | 'update_summary' | 'send_digest' | ...
+    target_type     VARCHAR(50),                    -- 目标类型
+    -- 'thread' | 'user' | 'room' | 'todo' | 'notification'
+    target_id       VARCHAR(255),                   -- 目标 ID
+    payload         JSONB NOT NULL DEFAULT '{}',    -- 操作参数
+    result          JSONB,                          -- 执行结果
+    -- {"success": true, "affected_count": 5, "details": "..."}
+    error_message   TEXT,                           -- 错误信息（失败时）
+    duration_ms     INTEGER,                        -- 执行耗时（毫秒）
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_butler_action_task ON butler_action_logs(task_id);
+CREATE INDEX idx_butler_action_type ON butler_action_logs(action_type, created_at DESC);
+CREATE INDEX idx_butler_action_target ON butler_action_logs(target_type, target_id) WHERE target_type IS NOT NULL;
+
+-- =============================================================
 -- VIEW: v_pending_sensitive
 -- 管理员用：查看所有待处理敏感条目
 -- =============================================================
@@ -819,6 +1103,357 @@ WHERE t.category = 'action_item'
   AND t.status = 'active'
   AND (t.structured_data->>'status') IN ('open', 'in_progress')
 ORDER BY t.structured_data->>'priority' DESC, t.last_message_at;
+
+-- =============================================================
+-- SECTION 15: 全局索引表
+-- 团队活动全景视图索引
+-- =============================================================
+
+CREATE TABLE global_activity_index (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    activity_type   VARCHAR(50) NOT NULL,   -- thread | task | decision | reference
+    activity_id     UUID NOT NULL,          -- 关联的话题/待办/决策ID
+    title           VARCHAR(500),
+    summary         TEXT,
+    category        VARCHAR(50),
+    importance      INTEGER DEFAULT 0,       -- 重要性评分 0-100
+    participants    JSONB DEFAULT '[]',      -- 参与者列表 [{user_id, display_name}]
+    keywords        JSONB DEFAULT '[]',      -- 关键词
+    occurred_at     TIMESTAMPTZ NOT NULL,
+    room_id         VARCHAR(100),
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_global_activity_time ON global_activity_index(occurred_at DESC);
+CREATE INDEX idx_global_activity_type ON global_activity_index(activity_type);
+CREATE INDEX idx_global_activity_importance ON global_activity_index(importance DESC);
+CREATE INDEX idx_global_activity_keywords ON global_activity_index USING GIN(keywords);
+CREATE INDEX idx_global_activity_room ON global_activity_index(room_id);
+
+COMMENT ON TABLE global_activity_index IS '全局索引：团队活动全景视图';
+
+-- =============================================================
+-- SECTION 16: 知识图谱表（Schemaless）
+-- 尽力而为的知识索引
+-- =============================================================
+
+CREATE TABLE knowledge_nodes (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    node_type       VARCHAR(50) NOT NULL,   -- person | team | topic | event | thing
+    node_key        VARCHAR(500) NOT NULL,  -- 唯一标识
+    display_name    VARCHAR(500),           -- 显示名称
+    attributes      JSONB DEFAULT '{}',     -- 任意属性
+    source_count    INTEGER DEFAULT 0,      -- 来源证据数量
+    confidence      FLOAT DEFAULT 0.5,      -- 置信度
+    first_seen_at   TIMESTAMPTZ NOT NULL,
+    last_seen_at    TIMESTAMPTZ NOT NULL,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(node_type, node_key)
+);
+
+CREATE TABLE knowledge_edges (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    source_id       UUID NOT NULL REFERENCES knowledge_nodes(id) ON DELETE CASCADE,
+    target_id       UUID NOT NULL REFERENCES knowledge_nodes(id) ON DELETE CASCADE,
+    edge_type       VARCHAR(100) NOT NULL,  -- 关系类型（动态）
+    attributes      JSONB DEFAULT '{}',     -- 关系属性
+    evidence        JSONB DEFAULT '[]',     -- 证据来源 [{thread_id, message_id, text}]
+    weight          FLOAT DEFAULT 1.0,      -- 关系强度
+    confidence      FLOAT DEFAULT 0.5,      -- 置信度
+    first_seen_at   TIMESTAMPTZ NOT NULL,
+    last_seen_at    TIMESTAMPTZ NOT NULL,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(source_id, target_id, edge_type)
+);
+
+CREATE INDEX idx_node_type ON knowledge_nodes(node_type);
+CREATE INDEX idx_node_key ON knowledge_nodes(node_key);
+CREATE INDEX idx_node_attrs ON knowledge_nodes USING GIN(attributes);
+CREATE INDEX idx_node_search ON knowledge_nodes
+    USING GIN(to_tsvector('simple', coalesce(display_name, '') || ' ' || coalesce(node_key, '')));
+
+CREATE INDEX idx_edge_source ON knowledge_edges(source_id);
+CREATE INDEX idx_edge_target ON knowledge_edges(target_id);
+CREATE INDEX idx_edge_type ON knowledge_edges(edge_type);
+CREATE INDEX idx_edge_attrs ON knowledge_edges USING GIN(attributes);
+
+COMMENT ON TABLE knowledge_nodes IS '知识图谱节点：Schemaless 实体存储';
+COMMENT ON TABLE knowledge_edges IS '知识图谱边：Schemaless 关系存储';
+
+-- =============================================================
+-- SECTION 17: 用户行为分析表
+-- =============================================================
+
+CREATE TABLE user_behavior_logs (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id         VARCHAR(255) NOT NULL,
+    behavior_type   VARCHAR(100) NOT NULL,  -- search | view | create | complete | subscribe
+    target_type     VARCHAR(100),           -- thread | todo | reference
+    target_id       UUID,
+    context         JSONB DEFAULT '{}',
+    session_id      UUID,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE user_behavior_patterns (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id         VARCHAR(255) NOT NULL UNIQUE,
+    active_hours    JSONB DEFAULT '{}',     -- {"9": 15, "10": 32, ...}
+    search_patterns JSONB DEFAULT '{}',     -- {"tech": 20, "faq": 15}
+    topic_interests JSONB DEFAULT '{}',     -- {"Redis": 10, "支付": 8}
+    avg_response_time_hours FLOAT,
+    completion_rate FLOAT DEFAULT 0,
+    contribution_score INTEGER DEFAULT 0,
+    last_updated    TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_behavior_user ON user_behavior_logs(user_id, created_at DESC);
+CREATE INDEX idx_behavior_type ON user_behavior_logs(behavior_type);
+CREATE INDEX idx_behavior_session ON user_behavior_logs(session_id);
+
+COMMENT ON TABLE user_behavior_logs IS '用户行为日志';
+COMMENT ON TABLE user_behavior_patterns IS '用户行为模式聚合';
+
+-- =============================================================
+-- SECTION 18: 热点分析表
+-- =============================================================
+
+CREATE TABLE topic_heat_scores (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    thread_id       UUID NOT NULL REFERENCES topic_threads(id) ON DELETE CASCADE,
+    score_date      DATE NOT NULL,
+
+    -- 热度因子
+    message_count   INTEGER DEFAULT 0,
+    participant_count INTEGER DEFAULT 0,
+    mention_count   INTEGER DEFAULT 0,
+    view_count      INTEGER DEFAULT 0,
+    action_count    INTEGER DEFAULT 0,
+    recency_score   FLOAT DEFAULT 0,
+    importance_score FLOAT DEFAULT 0,
+
+    -- 综合热度
+    heat_score      FLOAT DEFAULT 0,
+    heat_rank       INTEGER,
+
+    calculated_at   TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(thread_id, score_date)
+);
+
+CREATE TABLE user_activity_stats (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id         VARCHAR(255) NOT NULL UNIQUE,
+
+    -- 活跃度指标
+    messages_count      INTEGER DEFAULT 0,
+    threads_created     INTEGER DEFAULT 0,
+    threads_participated INTEGER DEFAULT 0,
+    decisions_made      INTEGER DEFAULT 0,
+    questions_asked     INTEGER DEFAULT 0,
+    questions_answered  INTEGER DEFAULT 0,
+
+    -- 贡献度指标
+    todos_created       INTEGER DEFAULT 0,
+    todos_completed     INTEGER DEFAULT 0,
+    references_added    INTEGER DEFAULT 0,
+    summaries_edited    INTEGER DEFAULT 0,
+    feedback_given      INTEGER DEFAULT 0,
+
+    -- 质量指标
+    avg_response_time   FLOAT,
+    completion_rate     FLOAT DEFAULT 0,
+    helpful_rate        FLOAT,
+
+    -- 综合分数
+    activity_score      INTEGER DEFAULT 0,
+    contribution_score  INTEGER DEFAULT 0,
+
+    -- 时间维度
+    period_start        DATE,
+    period_end          DATE,
+    last_updated        TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_heat_score ON topic_heat_scores(score_date, heat_score DESC);
+CREATE INDEX idx_heat_thread ON topic_heat_scores(thread_id);
+CREATE INDEX idx_user_activity_score ON user_activity_stats(activity_score DESC);
+CREATE INDEX idx_user_contrib_score ON user_activity_stats(contribution_score DESC);
+
+COMMENT ON TABLE topic_heat_scores IS '话题热度评分（每日计算）';
+COMMENT ON TABLE user_activity_stats IS '用户活跃度与贡献度统计';
+
+-- =============================================================
+-- SECTION 19: 话题状态视图
+-- =============================================================
+
+CREATE OR REPLACE VIEW topic_status_view AS
+SELECT
+    t.id,
+    t.title,
+    t.category,
+    t.last_message_at,
+    t.stakeholder_ids,
+
+    -- 判断状态
+    CASE
+        -- 进行中：最近7天有消息
+        WHEN t.last_message_at > NOW() - INTERVAL '7 days' THEN 'active'
+        -- 有未完成待办
+        WHEN EXISTS (
+            SELECT 1 FROM action_items a
+            WHERE a.thread_id = t.id AND a.status != 'done'
+        ) THEN 'active'
+
+        -- 待关注：7-30天无消息
+        WHEN t.last_message_at BETWEEN NOW() - INTERVAL '30 days' AND NOW() - INTERVAL '7 days' THEN 'needs_attention'
+        -- 敏感授权待处理
+        WHEN EXISTS (
+            SELECT 1 FROM sensitive_authorizations s
+            WHERE s.message_id IN (
+                SELECT m.id FROM messages m
+                WHERE m.thread_id = t.id
+            ) AND s.overall_status = 'pending'
+        ) THEN 'needs_attention'
+
+        -- 未闭环：问答无确认答案
+        WHEN t.category = 'qa_faq' AND NOT EXISTS (
+            SELECT 1 FROM thread_modifications m
+            WHERE m.thread_id = t.id AND m.modification_type = 'answer_confirmed'
+        ) THEN 'open_loop'
+        -- 决策后有待办未完成
+        WHEN t.category = 'tech_decision' AND EXISTS (
+            SELECT 1 FROM action_items a
+            WHERE a.thread_id = t.id AND a.status != 'done'
+        ) THEN 'open_loop'
+
+        -- 已结束
+        ELSE 'closed'
+    END AS status,
+
+    -- 未闭环原因
+    CASE
+        WHEN t.category = 'qa_faq' AND NOT EXISTS (
+            SELECT 1 FROM thread_modifications m
+            WHERE m.thread_id = t.id AND m.modification_type = 'answer_confirmed'
+        ) THEN 'pending_answer'
+        WHEN t.category = 'tech_decision' AND EXISTS (
+            SELECT 1 FROM action_items a
+            WHERE a.thread_id = t.id AND a.status != 'done'
+        ) THEN 'pending_action'
+        ELSE NULL
+    END AS open_loop_reason
+
+FROM topic_threads t;
+
+COMMENT ON VIEW topic_status_view IS '话题状态视图：active/needs_attention/open_loop/closed';
+
+-- =============================================================
+-- SECTION 20: 瓶颈记录表
+-- =============================================================
+
+CREATE TABLE bottleneck_records (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    thread_id       UUID REFERENCES topic_threads(id),
+
+    bottleneck_type VARCHAR(50) NOT NULL,  -- todo_overdue | resource_missing | person_blocked | stale_progress | sensitive_pending | qa_unanswered
+    severity        VARCHAR(20) NOT NULL,  -- high | medium | low
+    description     TEXT NOT NULL,
+
+    blocked_items   JSONB DEFAULT '[]',    -- 被阻塞的项目ID列表 [{id, type, title}]
+    impact_scope    JSONB DEFAULT '{}',    -- 影响范围 {affected_users, affected_todos}
+
+    suggested_action TEXT,                 -- 建议行动
+    assigned_to     VARCHAR(255),          -- 分配给谁处理
+    resolved_at     TIMESTAMPTZ,           -- 解决时间
+    resolution      TEXT,                  -- 解决说明
+
+    first_detected  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_updated    TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_bottleneck_thread ON bottleneck_records(thread_id);
+CREATE INDEX idx_bottleneck_type ON bottleneck_records(bottleneck_type);
+CREATE INDEX idx_bottleneck_severity ON bottleneck_records(severity);
+CREATE INDEX idx_bottleneck_unresolved ON bottleneck_records(severity, first_detected) WHERE resolved_at IS NULL;
+
+COMMENT ON TABLE bottleneck_records IS '瓶颈记录：自动识别和跟踪系统中的阻塞点';
+
+-- =============================================================
+-- SECTION 21: 支持关系表
+-- =============================================================
+
+CREATE TABLE support_relations (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    thread_id       UUID REFERENCES topic_threads(id),
+
+    supporter_id    VARCHAR(255) NOT NULL,  -- 提供支持的人
+    supported_id    VARCHAR(255),           -- 被支持的人（可选）
+    support_type    VARCHAR(100),           -- 技术 | 资源 | 人力 | 决策
+    support_context TEXT,                   -- 支持内容描述
+
+    status          VARCHAR(50) DEFAULT 'pending', -- pending | fulfilled | blocked
+    fulfilled_at    TIMESTAMPTZ,
+
+    evidence_text   TEXT,                   -- 原始消息文本
+    message_id      UUID REFERENCES messages(id),
+
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_support_thread ON support_relations(thread_id);
+CREATE INDEX idx_support_supporter ON support_relations(supporter_id);
+CREATE INDEX idx_support_supported ON support_relations(supported_id);
+CREATE INDEX idx_support_status ON support_relations(status);
+CREATE INDEX idx_support_type ON support_relations(support_type);
+
+COMMENT ON TABLE support_relations IS '支持关系：记录人与人之间的协作支持关系';
+
+-- =============================================================
+-- SECTION 22: Routine 脚本版本历史
+-- =============================================================
+
+CREATE TABLE routine_versions (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    routine_id      VARCHAR(100) NOT NULL,  -- routine 标识
+    version         INTEGER NOT NULL DEFAULT 1,
+    script_path     VARCHAR(500) NOT NULL,  -- 脚本文件路径
+    script_content  TEXT NOT NULL,          -- 脚本内容快照
+    change_summary  TEXT,                   -- 变更说明
+    changed_by      VARCHAR(255),           -- 修改者（可以是管家）
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(routine_id, version)
+);
+
+CREATE INDEX idx_routine_versions ON routine_versions(routine_id, version DESC);
+
+COMMENT ON TABLE routine_versions IS 'Routine脚本版本历史：记录所有routine的变更历史';
+
+-- =============================================================
+-- SECTION 23: 管家工具调用日志
+-- =============================================================
+
+CREATE TABLE butler_tool_calls (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    session_id      UUID,                   -- 会话ID
+    routine_id      VARCHAR(100),           -- 触发的 routine（如有）
+
+    tool_name       VARCHAR(100) NOT NULL,  -- 工具名称
+    tool_input      JSONB NOT NULL,         -- 输入参数
+    tool_output     JSONB,                  -- 输出结果
+    success         BOOLEAN DEFAULT true,
+    error_message   TEXT,                   -- 错误信息（如有）
+
+    duration_ms     INTEGER,                -- 执行耗时
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_tool_session ON butler_tool_calls(session_id);
+CREATE INDEX idx_tool_routine ON butler_tool_calls(routine_id);
+CREATE INDEX idx_tool_name ON butler_tool_calls(tool_name, created_at DESC);
+CREATE INDEX idx_tool_failed ON butler_tool_calls(tool_name) WHERE success = false;
+
+COMMENT ON TABLE butler_tool_calls IS '管家工具调用日志：记录Agent所有工具调用';
 
 -- =============================================================
 -- END OF DDL

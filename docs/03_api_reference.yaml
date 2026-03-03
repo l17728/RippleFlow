@@ -727,6 +727,7 @@ components:
         id: { type: string, format: uuid }
         task_type: { type: string }
         status: { type: string }
+        permission_level: { type: integer, description: "权限层级 0-3" }
         scheduled_at: { type: string, format: date-time }
         executed_at: { type: string, format: date-time, nullable: true }
         target_room_id: { type: string, format: uuid, nullable: true }
@@ -734,6 +735,7 @@ components:
         payload: { type: object }
         result: { type: object, nullable: true }
         error: { type: string, nullable: true }
+        report_reviewed: { type: boolean, description: "汇报是否已审核" }
         created_at: { type: string, format: date-time }
 
     ButlerExperience:
@@ -746,6 +748,134 @@ components:
         confidence: { type: number }
         sample_count: { type: integer }
         last_updated: { type: string, format: date-time }
+
+    ButlerProposal:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        task_type: { type: string, description: "任务类型" }
+        reasoning: { type: string, description: "发起原因" }
+        expected_impact: { type: string, description: "预期影响" }
+        risk_assessment: { type: string, nullable: true, description: "风险评估" }
+        payload: { type: object, description: "拟执行内容" }
+        status: { type: string, enum: [pending, approved, rejected, executed, cancelled] }
+        proposed_at: { type: string, format: date-time }
+        reviewed_by: { type: string, nullable: true, description: "审核人 ldap_user_id" }
+        reviewed_at: { type: string, format: date-time, nullable: true }
+        review_comment: { type: string, nullable: true }
+        executed_at: { type: string, format: date-time, nullable: true }
+        execution_result: { type: object, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    Subscription:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, description: "订阅者 ldap_user_id" }
+        subscription_type:
+          type: string
+          enum: [user, thread, category, keyword]
+          description: |
+            订阅类型：
+            - user: 关注用户
+            - thread: 关注话题线索
+            - category: 关注类别
+            - keyword: 关注关键词
+        target_id: { type: string, description: "被订阅对象 ID" }
+        target_name: { type: string, nullable: true, description: "被订阅对象名称（用于展示）" }
+        notification_types:
+          type: array
+          items:
+            type: string
+            enum: [in_app, email, push]
+          description: "通知方式"
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    SubscriptionStats:
+      type: object
+      properties:
+        subscription_type: { type: string }
+        target_id: { type: string }
+        target_name: { type: string }
+        subscriber_count: { type: integer, description: "订阅者数量" }
+        last_activity_at: { type: string, format: date-time, nullable: true }
+
+    PersonalTodo:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, description: "所属用户 ldap_user_id" }
+        title: { type: string, description: "待办标题" }
+        description: { type: string, nullable: true }
+        status:
+          type: string
+          enum: [pending, in_progress, completed, cancelled]
+        priority:
+          type: string
+          enum: [low, medium, high, urgent]
+        due_date: { type: string, format: date, nullable: true }
+        due_time: { type: string, format: time, nullable: true }
+        visibility:
+          type: string
+          enum: [private, followers, team, public]
+          description: |
+            可见性：
+            - private: 仅自己可见
+            - followers: 关注我的人可见
+            - team: 团队成员可见
+            - public: 所有人可见
+        published_at: { type: string, format: date-time, nullable: true }
+        source_type:
+          type: string
+          nullable: true
+          description: "来源类型：manual | action_item | meeting | import"
+        source_id: { type: string, format: uuid, nullable: true }
+        tags:
+          type: array
+          items: { type: string }
+        category: { type: string, nullable: true }
+        reminder_enabled: { type: boolean }
+        reminder_minutes_before: { type: integer, nullable: true }
+        reminded_at: { type: string, format: date-time, nullable: true }
+        completed_at: { type: string, format: date-time, nullable: true }
+        completed_by: { type: string, nullable: true }
+        collaborators:
+          type: array
+          items: { $ref: '#/components/schemas/TodoCollaborator' }
+        is_overdue: { type: boolean, description: "是否已过期" }
+        is_owner: { type: boolean, description: "当前用户是否为所有者" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    TodoCollaborator:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        todo_id: { type: string, format: uuid }
+        user_id: { type: string }
+        user_name: { type: string, description: "用户显示名称" }
+        role:
+          type: string
+          enum: [owner, editor, viewer]
+        can_complete: { type: boolean, description: "是否可标记完成" }
+        created_at: { type: string, format: date-time }
+
+    TodoHistory:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        todo_id: { type: string, format: uuid }
+        action:
+          type: string
+          description: "created | updated | status_changed | completed | commented"
+        old_value: { type: object, nullable: true }
+        new_value: { type: object, nullable: true }
+        changed_by: { type: string }
+        changed_by_name: { type: string }
+        comment: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
 
     # ── 系统统计（已有）──────────────────────────────────────────────
     SystemStats:
@@ -1237,6 +1367,50 @@ paths:
         '429':
           description: 24 小时内只能催促一次
 
+  /api/v1/sensitive/batch-authorize:
+    post:
+      tags: [sensitive]
+      summary: 批量授权敏感内容
+      description: 当事人对多条敏感内容统一处理
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [auth_ids, decision]
+              properties:
+                auth_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                  maxItems: 20
+                  description: 敏感授权 ID 列表
+                decision:
+                  type: string
+                  enum: [authorize, reject]
+                  description: 授权决策
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success_count: { type: integer }
+                  failed_items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        auth_id: { type: string, format: uuid }
+                        reason: { type: string }
+        '400':
+          description: 参数错误
+        '403':
+          description: 部分内容非当事人
+
   # ════════════════════════════════════════════════════
   # SUMMARIZE（纪要生成）
   # ════════════════════════════════════════════════════
@@ -1319,6 +1493,34 @@ paths:
       responses:
         '200':
           description: 已全部标记
+
+  /api/v1/notifications/mark-read:
+    post:
+      tags: [notifications]
+      summary: 批量标记已读
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [notification_ids]
+              properties:
+                notification_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                  maxItems: 100
+                  description: 通知 ID 列表
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  updated_count: { type: integer }
 
   # ════════════════════════════════════════════════════
   # ADMIN
@@ -1785,6 +1987,777 @@ paths:
                 items: { $ref: '#/components/schemas/ButlerExperience' }
         '403':
           description: 非管理员
+
+  /api/v1/butler/proposals:
+    get:
+      tags: [butler]
+      summary: 获取管家提案列表
+      description: 管理员查看 L3 权限提案
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [pending, approved, rejected, executed, cancelled]
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ButlerProposal' }
+        '403':
+          description: 非管理员
+
+    post:
+      tags: [butler]
+      summary: 创建管家提案
+      description: 管家发起 L3 权限操作提案（系统内部调用）
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [task_type, reasoning, expected_impact, payload]
+              properties:
+                task_type:
+                  type: string
+                  description: 任务类型
+                reasoning:
+                  type: string
+                  description: 发起原因
+                expected_impact:
+                  type: string
+                  description: 预期影响
+                risk_assessment:
+                  type: string
+                  description: 风险评估
+                payload:
+                  type: object
+                  description: 拟执行内容
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ButlerProposal' }
+        '403':
+          description: 非管理员
+
+  /api/v1/butler/proposals/{proposal_id}/approve:
+    post:
+      tags: [butler]
+      summary: 批准管家提案
+      description: 管理员批准 L3 权限提案
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: proposal_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                comment:
+                  type: string
+                  description: 审批备注
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ButlerProposal' }
+        '403':
+          description: 非管理员
+        '404':
+          description: 提案不存在
+        '409':
+          description: 提案状态不允许审批
+
+  /api/v1/butler/proposals/{proposal_id}/reject:
+    post:
+      tags: [butler]
+      summary: 拒绝管家提案
+      description: 管理员拒绝 L3 权限提案
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: proposal_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  description: 拒绝原因
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ButlerProposal' }
+        '403':
+          description: 非管理员
+        '404':
+          description: 提案不存在
+        '409':
+          description: 提案状态不允许审批
+
+  /api/v1/butler/reports/{task_id}/review:
+    post:
+      tags: [butler]
+      summary: 审核管家汇报
+      description: 管理员审核 L2 权限操作的事后汇报
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: task_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [normal, needs_adjustment, banned]
+                  description: 审核结果
+                comment:
+                  type: string
+                  description: 审核备注
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ButlerTask' }
+        '403':
+          description: 非管理员
+        '404':
+          description: 任务不存在
+
+  # ════════════════════════════════════════════════════
+  # SUBSCRIPTIONS（订阅/关注）
+  # ════════════════════════════════════════════════════
+
+  /api/v1/subscriptions:
+    get:
+      tags: [subscriptions]
+      summary: 获取当前用户的订阅列表
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: subscription_type
+          schema:
+            type: string
+            enum: [user, thread, category, keyword]
+        - in: query
+          name: is_active
+          schema: { type: boolean, default: true }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Subscription' }
+
+    post:
+      tags: [subscriptions]
+      summary: 创建订阅
+      description: 用户订阅某人、话题、类别或关键词
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subscription_type, target_id]
+              properties:
+                subscription_type:
+                  type: string
+                  enum: [user, thread, category, keyword]
+                  description: 订阅类型
+                target_id:
+                  type: string
+                  description: |
+                    被订阅对象 ID：
+                    - user: ldap_user_id
+                    - thread: thread UUID
+                    - category: category code
+                    - keyword: 关键词文本
+                notification_types:
+                  type: array
+                  items:
+                    type: string
+                    enum: [in_app, email, push]
+                  default: ["in_app"]
+                  description: 通知方式
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subscription' }
+        '400':
+          description: 无效的订阅类型或目标
+        '404':
+          description: 目标不存在
+        '409':
+          description: 已存在相同订阅
+
+  /api/v1/subscriptions/{subscription_id}:
+    delete:
+      tags: [subscriptions]
+      summary: 取消订阅
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: subscription_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: 取消成功
+        '403':
+          description: 非本人订阅
+        '404':
+          description: 订阅不存在
+
+    patch:
+      tags: [subscriptions]
+      summary: 更新订阅设置
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: subscription_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                notification_types:
+                  type: array
+                  items:
+                    type: string
+                    enum: [in_app, email, push]
+                is_active:
+                  type: boolean
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subscription' }
+        '403':
+          description: 非本人订阅
+        '404':
+          description: 订阅不存在
+
+  /api/v1/subscriptions/check:
+    get:
+      tags: [subscriptions]
+      summary: 检查是否已订阅某对象
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: subscription_type
+          required: true
+          schema:
+            type: string
+            enum: [user, thread, category, keyword]
+        - in: query
+          name: target_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  is_subscribed: { type: boolean }
+                  subscription: { $ref: '#/components/schemas/Subscription', nullable: true }
+
+  /api/v1/subscriptions/trending:
+    get:
+      tags: [subscriptions]
+      summary: 获取热门订阅对象
+      description: 查看当前最受欢迎的订阅目标
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: subscription_type
+          schema:
+            type: string
+            enum: [user, thread, category, keyword]
+        - in: query
+          name: limit
+          schema: { type: integer, default: 10 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    target_id: { type: string }
+                    target_name: { type: string }
+                    subscription_count: { type: integer }
+                    subscription_type: { type: string }
+
+  # ════════════════════════════════════════════════════
+  # PERSONAL TODOS（个人待办）
+  # ════════════════════════════════════════════════════
+
+  /api/v1/todos:
+    get:
+      tags: [todos]
+      summary: 获取当前用户的待办列表
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [pending, in_progress, completed, cancelled]
+        - in: query
+          name: priority
+          schema:
+            type: string
+            enum: [low, medium, high, urgent]
+        - in: query
+          name: due_before
+          schema: { type: string, format: date }
+          description: 截止日期在此之前的待办
+        - in: query
+          name: category
+          schema: { type: string }
+        - in: query
+          name: include_collaborated
+          schema: { type: boolean, default: false }
+          description: 是否包含作为协作者的待办
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, default: 0 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/PersonalTodo' }
+                  total: { type: integer }
+                  overdue_count: { type: integer }
+
+    post:
+      tags: [todos]
+      summary: 创建待办事项
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string, maxLength: 500 }
+                description: { type: string }
+                priority:
+                  type: string
+                  enum: [low, medium, high, urgent]
+                  default: medium
+                due_date: { type: string, format: date }
+                due_time: { type: string, format: time }
+                visibility:
+                  type: string
+                  enum: [private, followers, team, public]
+                  default: private
+                tags:
+                  type: array
+                  items: { type: string }
+                category: { type: string }
+                reminder_enabled: { type: boolean, default: true }
+                reminder_minutes_before: { type: integer, default: 30 }
+                collaborator_ids:
+                  type: array
+                  items: { type: string }
+                  description: 协作者 ldap_user_id 列表
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PersonalTodo' }
+        '400':
+          description: 参数错误
+
+  /api/v1/todos/{todo_id}:
+    get:
+      tags: [todos]
+      summary: 获取待办详情
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: todo_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PersonalTodo' }
+        '403':
+          description: 无权访问
+        '404':
+          description: 待办不存在
+
+    patch:
+      tags: [todos]
+      summary: 更新待办事项
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: todo_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string }
+                description: { type: string }
+                status:
+                  type: string
+                  enum: [pending, in_progress, completed, cancelled]
+                priority:
+                  type: string
+                  enum: [low, medium, high, urgent]
+                due_date: { type: string, format: date, nullable: true }
+                due_time: { type: string, format: time, nullable: true }
+                visibility:
+                  type: string
+                  enum: [private, followers, team, public]
+                tags:
+                  type: array
+                  items: { type: string }
+                category: { type: string }
+                reminder_enabled: { type: boolean }
+                reminder_minutes_before: { type: integer }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PersonalTodo' }
+        '403':
+          description: 无权修改
+        '404':
+          description: 待办不存在
+
+    delete:
+      tags: [todos]
+      summary: 删除待办事项
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: todo_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: 删除成功
+        '403':
+          description: 无权删除
+        '404':
+          description: 待办不存在
+
+  /api/v1/todos/{todo_id}/complete:
+    post:
+      tags: [todos]
+      summary: 标记待办完成
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: todo_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                comment:
+                  type: string
+                  description: 完成备注
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PersonalTodo' }
+        '403':
+          description: 无权操作
+        '404':
+          description: 待办不存在
+
+  /api/v1/todos/{todo_id}/reopen:
+    post:
+      tags: [todos]
+      summary: 重新打开待办
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: todo_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PersonalTodo' }
+        '403':
+          description: 无权操作
+        '404':
+          description: 待办不存在
+
+  /api/v1/todos/{todo_id}/collaborators:
+    get:
+      tags: [todos]
+      summary: 获取待办协作者列表
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: todo_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/TodoCollaborator' }
+
+    post:
+      tags: [todos]
+      summary: 添加协作者
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: todo_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id: { type: string, description: 协作者 ldap_user_id }
+                role:
+                  type: string
+                  enum: [editor, viewer]
+                  default: viewer
+                can_complete: { type: boolean, default: false }
+      responses:
+        '201':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TodoCollaborator' }
+        '403':
+          description: 无权添加
+        '404':
+          description: 待办不存在
+        '409':
+          description: 已是协作者
+
+  /api/v1/todos/{todo_id}/collaborators/{user_id}:
+    delete:
+      tags: [todos]
+      summary: 移除协作者
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: todo_id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: path
+          name: user_id
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: 移除成功
+        '403':
+          description: 无权操作
+        '404':
+          description: 协作者不存在
+
+  /api/v1/todos/{todo_id}/history:
+    get:
+      tags: [todos]
+      summary: 获取待办历史记录
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: todo_id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/TodoHistory' }
+
+  /api/v1/todos/user/{user_id}:
+    get:
+      tags: [todos]
+      summary: 获取某用户的公开待办
+      description: 查看其他用户发布的待办（visibility != private）
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: user_id
+          required: true
+          schema: { type: string }
+          description: 用户 ldap_user_id
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [pending, in_progress, completed, cancelled]
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/PersonalTodo' }
+                  total: { type: integer }
+                  user_info:
+                    type: object
+                    properties:
+                      user_id: { type: string }
+                      display_name: { type: string }
+                      is_followed: { type: boolean }
+
+  /api/v1/todos/stats:
+    get:
+      tags: [todos]
+      summary: 获取待办统计
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer }
+                  pending: { type: integer }
+                  in_progress: { type: integer }
+                  completed: { type: integer }
+                  overdue: { type: integer }
+                  due_today: { type: integer }
+                  due_this_week: { type: integer }
+                  by_priority:
+                    type: object
+                    properties:
+                      urgent: { type: integer }
+                      high: { type: integer }
+                      medium: { type: integer }
+                      low: { type: integer }
+
+  /api/v1/todos/categories:
+    get:
+      tags: [todos]
+      summary: 获取用户的待办分类列表
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name: { type: string }
+                    count: { type: integer }
 
 security:
   - cookieAuth: []
