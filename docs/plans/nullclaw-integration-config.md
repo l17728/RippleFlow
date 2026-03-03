@@ -53,7 +53,534 @@
 
 ---
 
-## 一、整体架构
+## 一、nullclaw 原生能力与自研替代分析
+
+### 1.1 核心原则：优先使用 nullclaw 原生能力
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                nullclaw 原生能力 vs 自研对比                     │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ❌ 不再自研（使用 nullclaw 原生）    ✅ 需要开发（RippleFlow）  │
+│  ────────────────────────────────    ─────────────────────────  │
+│                                                                 │
+│  • 事件总线 → channels/webhook      • 数据存储（SQLite/PG）     │
+│  • 触发机制 → channels + cron        • 全文索引（FTS5）         │
+│  • 记忆系统 → memory 三层架构        • 业务 API（CRUD）         │
+│  • 工具调用 → tools 模块             • CLI 命令（rf）           │
+│  • 配对验证 → security.pairing       • Webhook 接收端           │
+│  • 审计日志 → security.audit         • 消息处理流水线           │
+│  • 自主控制 → autonomy 模块          • 知识图谱构建             │
+│  • 定时任务 → cron 模块              • LLM Prompt 模板         │
+│  • 成本控制 → autonomy.cost_control  • 前端 Dashboard          │
+│  • 多代理 → agents 模块              • 多平台适配器            │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                架构价值                                  │   │
+│  │                                                         │   │
+│  │  使用 nullclaw 原生能力：                                │   │
+│  │  • 减少约 40% 的开发工作量                               │   │
+│  │  • 避免"重复造轮子"导致的维护负担                        │   │
+│  │  • 自动获得 nullclaw 的功能更新                          │   │
+│  │  • 专注于 RippleFlow 核心业务价值                        │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 1.2 Channels（事件通道）- 替代"事件总线"
+
+**原设计**：在 `08_ai_butler_architecture.md` 中设计了"事件总线 (Event Bus)"
+**新方案**：使用 nullclaw channels 原生能力
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    nullclaw Channels 架构                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  RippleFlow 平台                nullclaw Agent                  │
+│  ─────────────                  ─────────────                   │
+│                                                                 │
+│  消息入库完成 ──────────────────→ channel: message.received     │
+│  话题创建完成 ──────────────────→ channel: thread.created       │
+│  待办状态变更 ──────────────────→ channel: todo.status_changed  │
+│  敏感内容检测 ──────────────────→ channel: sensitive.detected   │
+│  问答请求 ──────────────────────→ channel: user.query           │
+│                                                                 │
+│  nullclaw 自动：                                                │
+│  • 接收 channel 事件                                            │
+│  • 根据 Routine 脚本判断是否需要行动                            │
+│  • 执行相应的 CLI 命令                                          │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**事件推送方式**：
+
+RippleFlow 平台在业务操作完成后，通过 HTTP POST 推送事件到 nullclaw gateway：
+
+```bash
+# RippleFlow 平台代码示例
+async def notify_nullclaw(event_type: str, payload: dict):
+    await http_post(
+        url="${NULLCLAW_GATEWAY_URL}/webhook/rippleflow",
+        json={
+            "event": event_type,
+            "timestamp": datetime.utcnow().isoformat(),
+            "payload": payload
+        }
+    )
+```
+
+**nullclaw 配置**：
+
+```json
+{
+  "channels": {
+    "enabled": ["dingtalk", "lark", "web", "rippleflow_events"],
+
+    "rippleflow_events": {
+      "type": "webhook",
+      "webhook_path": "/webhook/rippleflow",
+      "events": [
+        "message.received",
+        "thread.created",
+        "thread.updated",
+        "todo.created",
+        "todo.completed",
+        "sensitive.detected",
+        "sensitive.authorized",
+        "user.query",
+        "user.feedback"
+      ]
+    }
+  }
+}
+```
+
+### 1.3 Memory（三层记忆系统）- 替代简单 MEMORY.md
+
+**原设计**：仅有 MEMORY.md 文件
+**新方案**：使用 nullclaw memory 三层架构
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    nullclaw Memory 三层架构                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  L1 活跃层 (.rippleflow/memory/)                                │
+│  ─────────────────────────────                                  │
+│  • 最近 7 天的对话和事件                                         │
+│  • 自动加载到上下文                                             │
+│  • 每日自动归档                                                 │
+│                                                                 │
+│  L2 归档层 (.rippleflow/archive/)                               │
+│  ─────────────────────────────                                  │
+│  • 压缩后的历史摘要                                             │
+│  • LLM 自动生成摘要                                             │
+│  • 保留原始内容（可追溯）                                        │
+│                                                                 │
+│  L3 核心层 (.rippleflow/MEMORY.md)                              │
+│  ─────────────────────────────                                  │
+│  • 永久保留的核心知识                                            │
+│  • 人工审核后才会更新                                           │
+│  • 最大 20000 字符                                              │
+│                                                                 │
+│  nullclaw 自动处理：                                            │
+│  • compaction: 每日 2:00 自动压缩                               │
+│  • hygiene: 每周日 3:00 清理过期内容                            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**nullclaw 配置**：
+
+```json
+{
+  "memory": {
+    "backend": "markdown",
+    "workspace_dir": ".rippleflow",
+    "layers": {
+      "L1_active": {
+        "path": "memory/",
+        "max_age_days": 7,
+        "auto_archive": true
+      },
+      "L2_archive": {
+        "path": "archive/",
+        "max_age_days": 90,
+        "keep_original": true
+      },
+      "L3_core": {
+        "path": "MEMORY.md",
+        "max_size": 20000,
+        "require_review": true
+      }
+    },
+    "lifecycle": {
+      "compaction": {
+        "enabled": true,
+        "schedule": "0 2 * * *",
+        "max_age_days": 30,
+        "summary_model": "glm-4-plus",
+        "min_messages_to_compress": 50
+      },
+      "hygiene": {
+        "enabled": true,
+        "schedule": "0 3 * * 0",
+        "remove_duplicates": true,
+        "archive_old_files": true
+      }
+    }
+  }
+}
+```
+
+### 1.4 Tools（工具模块）- 管家能力调用
+
+**原设计**：未定义管家工具调用机制
+**新方案**：使用 nullclaw tools 模块
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    nullclaw Tools 工具集                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  shell_execute（命令执行）                                       │
+│  ─────────────────────                                          │
+│  • 执行 rf 命令与 RippleFlow 平台交互                            │
+│  • 安全限制：只允许执行白名单命令                                 │
+│  • 超时控制：防止命令卡死                                        │
+│                                                                 │
+│  http_request（HTTP 请求）                                       │
+│  ─────────────────────                                          │
+│  • 调用外部 API（如企业内部系统）                                 │
+│  • 获取外部数据（如天气、日历等）                                 │
+│  • 发送通知到其他系统                                            │
+│                                                                 │
+│  file_read / file_write（文件操作）                              │
+│  ─────────────────────────────                                  │
+│  • 读取/写入 .rippleflow/ 目录下的文件                           │
+│  • 创建新的 Routine 脚本                                        │
+│  • 更新 insights/ 自省沉淀                                       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**nullclaw 配置**：
+
+```json
+{
+  "tools": {
+    "enabled": [
+      "shell_execute",
+      "http_request",
+      "file_read",
+      "file_write"
+    ],
+
+    "shell_execute": {
+      "allowed_commands": ["rf"],
+      "working_directory": "${RIPPLEFLOW_HOME}",
+      "timeout": 30000,
+      "max_output_size": 65536
+    },
+
+    "http_request": {
+      "allowed_domains": ["*"],
+      "timeout": 10000,
+      "max_response_size": 1048576
+    },
+
+    "file_read": {
+      "allowed_paths": [
+        ".rippleflow/*",
+        "/tmp/rippleflow/*"
+      ]
+    },
+
+    "file_write": {
+      "allowed_paths": [
+        ".rippleflow/insights/*",
+        ".rippleflow/prompts/ROUTINES/*",
+        ".rippleflow/proposals/*"
+      ],
+      "max_file_size": 1048576
+    }
+  }
+}
+```
+
+### 1.5 Security（安全模块）- 替代自研安全机制
+
+**原设计**：有审计设计，无配对验证
+**新方案**：使用 nullclaw security 完整安全能力
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    nullclaw Security 安全机制                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Pairing（配对验证）                                             │
+│  ─────────────────                                              │
+│  • 新设备首次连接需要输入配对码                                   │
+│  • 防止未授权设备接入                                            │
+│  • 配对码 6 位，5 分钟有效                                       │
+│                                                                 │
+│  Audit（审计日志）                                               │
+│  ─────────────────                                              │
+│  • 记录所有敏感操作                                              │
+│  • tool_call: 工具调用记录                                      │
+│  • routine_create: Routine 创建记录                             │
+│  • proposal_submit: 提案提交记录                                │
+│  • reflection_audit: 自省操作审计                                │
+│                                                                 │
+│  Rate Limiting（频率限制）                                       │
+│  ─────────────────                                              │
+│  • 防止滥用                                                      │
+│  • 可配置每分钟请求数                                            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**nullclaw 配置**：
+
+```json
+{
+  "security": {
+    "pairing": {
+      "enabled": true,
+      "code_length": 6,
+      "expiry_seconds": 300,
+      "max_attempts": 3
+    },
+
+    "audit": {
+      "enabled": true,
+      "log_path": ".rippleflow/logs/audit.log",
+      "retention_days": 365,
+      "events": [
+        "tool_call",
+        "routine_create",
+        "routine_modify",
+        "proposal_submit",
+        "memory_modify",
+        "cost_exceeded"
+      ],
+      "reflection_audit": {
+        "enabled": true,
+        "log_path": ".rippleflow/logs/reflection_audit.log",
+        "retention_days": 365
+      }
+    },
+
+    "rate_limit": {
+      "enabled": true,
+      "requests_per_minute": 60,
+      "burst": 10
+    }
+  }
+}
+```
+
+### 1.6 Autonomy（自主控制模块）- 新增能力
+
+**原设计**：无自主控制机制
+**新方案**：使用 nullclaw autonomy 模块
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    nullclaw Autonomy 自主控制                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  自主等级（level: 0-3）                                          │
+│  ─────────────────────                                          │
+│  • Level 0: 完全被动，只响应明确请求                              │
+│  • Level 1: 可执行低风险操作（L1 权限）                           │
+│  • Level 2: 可执行中等风险操作（L2 权限）                         │
+│  • Level 3: 可自主决策大部分操作                                  │
+│                                                                 │
+│  成本控制                                                        │
+│  ────────                                                       │
+│  • max_cost_per_day: 每日最大成本                                │
+│  • max_tokens_per_request: 单次最大 token                       │
+│  • alert_threshold: 超过阈值告警                                 │
+│                                                                 │
+│  确认要求                                                        │
+│  ────────                                                       │
+│  • 指定哪些操作需要人工确认                                       │
+│  • sensitive_escalate: 敏感授权升级                              │
+│  • routine_create_l2: 创建 L2 级 Routine                        │
+│  • proposal_submit: 提交新命令提案                               │
+│                                                                 │
+│  自省策略                                                        │
+│  ────────                                                       │
+│  • auto_apply: 是否自动应用优化                                  │
+│  • require_human_review: 是否需要人工审核                        │
+│  • audit_all_changes: 是否审计所有变更                           │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**nullclaw 配置**：
+
+```json
+{
+  "autonomy": {
+    "level": 2,
+
+    "cost_control": {
+      "max_cost_per_day": 10.0,
+      "max_tokens_per_request": 4096,
+      "alert_threshold": 0.8,
+      "currency": "CNY"
+    },
+
+    "require_confirmation": [
+      "sensitive_escalate",
+      "routine_create_l2",
+      "proposal_submit",
+      "memory_modify_l3"
+    ],
+
+    "reflection_policy": {
+      "auto_apply_l1": true,
+      "auto_apply_l2": false,
+      "require_human_review": true,
+      "audit_all_changes": true,
+      "max_auto_changes_per_day": 5
+    }
+  }
+}
+```
+
+### 1.7 Cron（定时任务模块）- 替代 Celery Beat
+
+**原设计**：使用 Celery Beat + Redis 实现定时任务
+**新方案**：使用 nullclaw cron 原生能力
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    nullclaw Cron 定时任务                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  nullclaw 原生支持：                                             │
+│  • 标准 cron 表达式                                              │
+│  • 时区支持                                                      │
+│  • 任务依赖                                                      │
+│  • 失败重试                                                      │
+│                                                                 │
+│  RippleFlow 不需要：                                             │
+│  ❌ Celery Beat 配置                                            │
+│  ❌ Celery Worker 进程                                          │
+│  ❌ Redis 作为消息队列（可选用于缓存）                            │
+│  ❌ 定时任务调度代码                                             │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 1.8 Agents（多代理模块）- 新增能力
+
+**原设计**：单一 AI 管家
+**新方案**：支持多 Agent 协作
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    nullclaw 多 Agent 架构                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  rippleflow_butler（主管家）                                     │
+│  ───────────────────────                                        │
+│  • 职责：总控、协调、决策                                        │
+│  • 模型：glm-4-plus                                             │
+│                                                                 │
+│  rippleflow_qa（问答专家）                                       │
+│  ───────────────────────                                        │
+│  • 职责：问答、搜索、知识检索                                     │
+│  • 模型：glm-4-plus                                             │
+│  • 专注领域：qa_faq, reference_data                             │
+│                                                                 │
+│  rippleflow_analyst（分析专家）                                  │
+│  ───────────────────────                                        │
+│  • 职责：统计、报告、趋势分析                                     │
+│  • 模型：glm-4-plus                                             │
+│  • 专注领域：contribution, collaboration                        │
+│                                                                 │
+│  rippleflow_coordinator（协调专家）                              │
+│  ───────────────────────                                        │
+│  • 职责：任务分配、进度跟踪                                       │
+│  • 模型：glm-4                                                  │
+│  • 专注领域：action_item, todos                                 │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**nullclaw 配置**：
+
+```json
+{
+  "agents": {
+    "rippleflow_butler": {
+      "provider": "zhipu",
+      "model": "glm-4-plus",
+      "system_prompt_file": "prompts/IDENTITY.md",
+      "max_history_messages": 100,
+      "max_tool_iterations": 50,
+      "temperature": 0.7,
+      "workspace_dir": ".rippleflow",
+      "shell": {
+        "enabled": true,
+        "allowed_commands": ["rf"],
+        "working_directory": "${RIPPLEFLOW_HOME}"
+      }
+    },
+
+    "rippleflow_qa": {
+      "provider": "zhipu",
+      "model": "glm-4-plus",
+      "system_prompt_file": "prompts/QA_EXPERT.md",
+      "max_history_messages": 50,
+      "temperature": 0.3,
+      "specialization": ["qa_faq", "reference_data", "tech_decision"]
+    },
+
+    "rippleflow_analyst": {
+      "provider": "zhipu",
+      "model": "glm-4-plus",
+      "system_prompt_file": "prompts/ANALYST.md",
+      "max_history_messages": 30,
+      "temperature": 0.5,
+      "specialization": ["contribution", "collaboration", "stats"]
+    },
+
+    "rippleflow_coordinator": {
+      "provider": "zhipu",
+      "model": "glm-4",
+      "system_prompt_file": "prompts/COORDINATOR.md",
+      "max_history_messages": 50,
+      "temperature": 0.4,
+      "specialization": ["action_item", "todos", "reminder"]
+    }
+  }
+}
+```
+
+### 1.9 需要重构的原设计清单
+
+| 文件 | 原设计 | 重构方案 |
+|------|--------|----------|
+| `08_ai_butler_architecture.md` | 事件总线 (Event Bus) | 删除，使用 nullclaw channels |
+| `08_ai_butler_architecture.md` | 感知模块事件监听 | 简化，事件由 nullclaw 接收 |
+| `08_ai_butler_architecture.md` | 触发框架 triggers.md | 保留，作为 Routine 脚本的触发条件 |
+| `01_system_architecture.md` | Celery Beat 定时任务 | 删除，使用 nullclaw cron |
+| `01_system_architecture.md` | Redis 作为消息队列 | 可选，仅用于缓存 |
+| `04_service_interfaces.md` | ButlerScheduler 接口 | 删除，由 nullclaw 调度 |
+| 新增 | - | RippleFlow 事件推送接口 |
+
+---
+
+## 二、整体架构
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -1169,9 +1696,318 @@ routines:
 
 ---
 
-## 五、提示词文件
+## 五、自省驱动的能力扩展机制
 
-### 5.1 IDENTITY.md（核心身份）
+### 8.1 核心理念
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                 AI 管家能力扩展闭环                               │
+│                                                                 │
+│   ┌─────────┐     ┌─────────┐     ┌─────────┐     ┌─────────┐  │
+│   │  自省   │ ──→ │  评估   │ ──→ │  决策   │ ──→ │  执行   │  │
+│   │ 发现新  │     │ 现有CLI │     │ 自行开发 │     │ 新能力  │  │
+│   需求     │     │ 能覆盖? │     │ 或提案  │     │ 上线    │  │
+│   └─────────┘     └─────────┘     └─────────┘     └─────────┘  │
+│        ↑                                               │        │
+│        └───────────────────────────────────────────────┘        │
+│                     持续学习与演化                               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**关键原则**：
+- 能用现有命令组合解决 → **自行开发新 Routine**（L2 权限）
+- 需要新命令 → **提交提案**，等待人工审批（L3 权限）
+
+### 8.2 自省发现新需求的来源
+
+| 来源 | 示例 | 触发频率 |
+|------|------|----------|
+| **用户请求分析** | 多次被问到"XX在哪"，发现需要自动汇总 | 实时 |
+| **失败模式识别** | 某类任务识别准确率低，需要新检测规则 | 每日自省 |
+| **效率优化机会** | 手动操作频繁，可自动化 | 每周复盘 |
+| **用户反馈** | "希望能自动..."的请求 | 实时 |
+| **数据模式发现** | 发现新的信息类别或任务类型 | 每周 |
+
+### 8.3 能力评估流程
+
+```markdown
+# 自省评估提示词
+
+## 输入
+- 发现的新需求：{new_requirement}
+- 现有命令列表：`rf help` 输出
+
+## 评估步骤
+
+1. **解析需求**
+   - 需求类型：[通知 | 报告 | 提醒 | 分析 | 数据处理]
+   - 触发条件：[定时 | 事件 | 手动]
+   - 输入数据：[话题 | 待办 | 用户 | 消息]
+   - 输出格式：[通知 | 报告 | 数据]
+
+2. **搜索可用命令**
+   ```bash
+   rf help
+   rf <command> --help
+   ```
+
+3. **评估覆盖度**
+   - 能否用单个命令解决？
+   - 能否用命令组合解决？
+   - 是否需要新增命令？
+
+4. **输出评估结果**
+   ```yaml
+   assessment:
+     requirement: "自动汇总每周新加入成员"
+     can_achieve_with_existing: true
+     solution:
+       type: "routine"
+       commands:
+         - "rf admin whitelist list --active --from last-week -o json"
+         - "rf notifications send --to admin --title '新成员汇总'"
+       estimated_steps: 2
+     new_commands_needed: []
+   ```
+```
+
+### 8.4 决策矩阵
+
+| 场景 | CLI 覆盖度 | 决策 | 权限 | 审批 |
+|------|-----------|------|------|------|
+| 完全覆盖 | 100% | 自行创建 Routine | L1 | 无需审批 |
+| 组合可实现 | 80-99% | 自行创建 Routine | L2 | 事后汇报 |
+| 需要新参数 | 60-79% | 提交参数扩展提案 | L2 | 人工审批 |
+| 需要新命令 | < 60% | 提交新命令提案 | L3 | 人工审批 |
+
+### 8.5 自行开发新 Routine 流程
+
+#### 8.5.1 创建流程
+
+```yaml
+# 自行开发新 Routine 的标准流程
+
+workflow:
+  1_discover:
+    action: "自省发现新需求"
+    output: "需求描述文档"
+
+  2_assess:
+    action: "评估现有 CLI 能力"
+    command: "rf help && rf <cmd> --help"
+    output: "评估报告"
+
+  3_design:
+    action: "设计 Routine 逻辑"
+    output: "Routine 草稿"
+
+  4_test:
+    action: "手动测试命令组合"
+    command: "rf <cmd1> ... | rf <cmd2> ..."
+    output: "测试结果"
+
+  5_create:
+    action: "创建 Routine 文件"
+    path: ".rippleflow/prompts/ROUTINES/routine_xxx.md"
+    permission: L2
+
+  6_register:
+    action: "注册到索引"
+    path: ".rippleflow/prompts/ROUTINES/index.yaml"
+
+  7_notify:
+    action: "通知管理员"
+    command: 'rf notifications send --to admin --title "新 Routine 已创建"'
+```
+
+#### 8.5.2 Routine 模板
+
+```markdown
+# routine_xxx.md
+
+## 元信息
+- id: routine_xxx
+- name: [Routine 名称]
+- schedule: "[cron 表达式]" | trigger: "[事件类型]"
+- permission: L1 | L2
+- enabled: true
+- created_by: butler_auto
+- created_at: [日期]
+- source: [自省发现 | 用户请求 | 效率优化]
+
+## 背景说明
+[为什么需要这个 Routine，发现过程]
+
+## 触发条件
+- [触发条件描述]
+
+## 执行步骤
+
+1. [步骤1描述]
+   ```bash
+   rf <command> [options]
+   ```
+
+2. [步骤2描述]
+   ```bash
+   rf <command> [options]
+   ```
+
+## 输出格式
+[输出示例]
+
+## 错误处理
+[错误处理策略]
+```
+
+### 8.6 新命令提案流程
+
+#### 8.6.1 提案模板
+
+```yaml
+# proposals/new_command_xxx.yaml
+
+proposal:
+  id: prop_20260303_001
+  type: new_command
+  status: pending
+  created_at: "2026-03-03T10:00:00Z"
+  created_by: butler
+
+  need:
+    title: "新增命令：rf threads batch-update"
+    description: |
+      场景：每周需要批量更新多个话题的状态（如批量归档）
+      现有方案：需要逐个执行 rf threads update，效率低
+      影响：每周约 20+ 次手动操作
+
+  current_workaround:
+    commands:
+      - "rf threads list --status active --older-than 30 -o json"
+      - "for each: rf threads update <id> --status archived"
+    pain_points:
+      - "需要手动循环处理"
+      - "无事务保证"
+      - "效率低"
+
+  proposed_command:
+    syntax: "rf threads batch-update [options]"
+    options:
+      - name: "--status"
+        type: enum
+        required: true
+      - name: "--filter"
+        type: string
+        description: "过滤条件 JSON"
+      - name: "--dry-run"
+        type: flag
+    example: |
+      rf threads batch-update --status archived \
+        --filter '{"older_than": 30, "category": "qa_faq"}'
+
+  estimated_effort: "medium"
+  priority: "medium"
+
+review:
+  reviewed_by: null
+  reviewed_at: null
+  decision: null
+  notes: null
+```
+
+#### 8.6.2 提案审批流程
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    提案审批流程                                  │
+│                                                                 │
+│  1. 但家创建提案                                                │
+│     └→ 保存到 proposals/ 目录                                   │
+│                                                                 │
+│  2. 通知管理员                                                  │
+│     └→ rf notifications send --to admin --title "新提案待审批"  │
+│                                                                 │
+│  3. 管理员审批                                                  │
+│     ├→ rf butler proposals list                                 │
+│     ├→ rf butler approve <proposal_id>                          │
+│     └→ rf butler reject <proposal_id> --reason "..."            │
+│                                                                 │
+│  4. 批准后                                                      │
+│     └→ 创建 GitHub Issue，指派开发者                            │
+│                                                                 │
+│  5. 拒绝后                                                      │
+│     └→ 记录原因，但家可学习避免类似提案                          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 8.7 自省扩展示例
+
+#### 示例1：自动发现并创建新 Routine
+
+```yaml
+# 自省日志示例
+
+reflection:
+  date: "2026-03-05"
+  discovered_needs:
+    - description: "每周一早上需要汇总上周新增的待办完成情况"
+      frequency: "已连续 3 周有人手动询问"
+      source: "用户请求分析"
+
+  assessment:
+    can_achieve: true
+    commands_needed:
+      - "rf todos list --completed-this-week -o json"
+      - "rf contribution stats --week -o json"
+    routine_name: "weekly_completion_summary"
+
+  action_taken:
+    type: "create_routine"
+    file: "routine_weekly_completion_summary.md"
+    schedule: "0 8 * * 1"
+    permission: L2
+    notify_admin: true
+```
+
+#### 示例2：发现需要新命令并提交提案
+
+```yaml
+# 自省日志示例
+
+reflection:
+  date: "2026-03-05"
+  discovered_needs:
+    - description: "批量导出某个群的历史消息为 Markdown"
+      frequency: "已收到 5 次类似请求"
+      source: "用户反馈"
+
+  assessment:
+    can_achieve: false
+    reason: "现有命令只能单条查询，无批量导出功能"
+    gap: "缺少 rf export 命令"
+
+  action_taken:
+    type: "submit_proposal"
+    proposal_file: "proposals/new_command_export.yaml"
+    priority: "medium"
+```
+
+### 8.8 自省能力边界
+
+| 管家可以做的 | 管家不能做的 |
+|-------------|-------------|
+| 创建新 Routine（L1/L2） | 修改核心提示词（core/） |
+| 组合现有命令 | 新增 CLI 命令代码 |
+| 优化现有 Routine | 修改数据库 Schema |
+| 提交改进提案 | 修改 API 接口 |
+| 学习用户偏好 | 修改权限配置 |
+
+---
+
+## 六、提示词文件
+
+### 6.1 IDENTITY.md（核心身份）
 
 ```markdown
 # RippleFlow AI 管家
@@ -1254,7 +2090,7 @@ rf sensitive decide <auth_id> --decision approve
 
 ---
 
-## 六、启动命令
+## 七、启动命令
 
 ```bash
 # 初始化 workspace
@@ -1276,7 +2112,7 @@ nullclaw service --config .rippleflow/config.json
 
 ---
 
-## 七、与 RippleFlow 后端集成
+## 八、与 RippleFlow 后端集成
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
