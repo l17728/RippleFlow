@@ -1639,5 +1639,201 @@ CREATE INDEX IF NOT EXISTS idx_messages_content_hash ON messages(room_id, conten
 COMMENT ON COLUMN messages.content_hash IS '消息内容哈希（SHA256），用于增量导入去重';
 
 -- =============================================================
+-- SECTION 14: 四大类信息分类架构
+-- =============================================================
+
+-- 四大类定义表（顶层分类）
+CREATE TABLE info_domains (
+    code            VARCHAR(50) PRIMARY KEY,
+    display_name    VARCHAR(100) NOT NULL,
+    description     TEXT,
+    icon            VARCHAR(50),
+    color           VARCHAR(20),
+    sort_order      INTEGER
+);
+
+INSERT INTO info_domains VALUES
+('knowledge', '知识库', 'FAQ、经验总结、术语规则、外部资源', 'book', 'blue', 1),
+('action', '任务与待办', '显性任务、隐性承诺、多步骤事项', 'check-circle', 'green', 2),
+('event', '事件与线索', '项目里程碑、问题处理全过程、决策过程', 'git-branch', 'purple', 3),
+('collaboration', '协作网络', '沟通关系、任务关系、知识关系', 'users', 'orange', 4);
+
+COMMENT ON TABLE info_domains IS '四大类信息域：系统顶层分类标准';
+
+-- 为 category_definitions 添加 domain 映射
+ALTER TABLE category_definitions ADD COLUMN IF NOT EXISTS info_domain VARCHAR(50) REFERENCES info_domains(code);
+
+UPDATE category_definitions SET info_domain = 'knowledge'
+WHERE code IN ('qa_faq', 'knowledge_share', 'reference_data', 'env_config');
+
+UPDATE category_definitions SET info_domain = 'action'
+WHERE code = 'action_item';
+
+UPDATE category_definitions SET info_domain = 'event'
+WHERE code IN ('tech_decision', 'bug_incident', 'project_update', 'discussion_notes');
+
+-- 为 topic_threads 添加 info_domain 字段
+ALTER TABLE topic_threads ADD COLUMN IF NOT EXISTS info_domain VARCHAR(50) REFERENCES info_domains(code);
+
+-- 触发器：自动根据 category 设置 info_domain
+CREATE OR REPLACE FUNCTION fn_set_info_domain()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.info_domain := (SELECT info_domain FROM category_definitions WHERE code = NEW.category);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_set_info_domain
+    BEFORE INSERT ON topic_threads
+    FOR EACH ROW
+    EXECUTE FUNCTION fn_set_info_domain();
+
+-- 更新现有数据的 info_domain
+UPDATE topic_threads t SET info_domain = cd.info_domain
+FROM category_definitions cd
+WHERE t.category = cd.code AND t.info_domain IS NULL;
+
+CREATE INDEX idx_threads_info_domain ON topic_threads(info_domain);
+
+-- =============================================================
+-- SECTION 15: 任务待办增强
+-- =============================================================
+
+-- action_items 表增强
+ALTER TABLE action_items ADD COLUMN IF NOT EXISTS source_type VARCHAR(50) DEFAULT 'explicit';
+-- explicit: 显性任务 | implicit: 隐性承诺 | multi_step: 多步骤拆解
+
+ALTER TABLE action_items ADD COLUMN IF NOT EXISTS commitment_status VARCHAR(50);
+-- identified: 已识别待确认 | confirmed: 已确认 | dismissed: 已忽略
+
+COMMENT ON COLUMN action_items.source_type IS '任务来源类型：explicit显性|implicit隐性承诺|multi_step多步骤';
+COMMENT ON COLUMN action_items.commitment_status IS '隐性承诺状态：identified待确认|confirmed已确认|dismissed已忽略';
+
+-- 完成信号检测配置表
+CREATE TABLE completion_signals (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    signal_text     VARCHAR(100) NOT NULL UNIQUE,
+    signal_type     VARCHAR(50) NOT NULL,  -- exact | pattern | emoji
+    confidence      FLOAT DEFAULT 1.0,
+    is_active       BOOLEAN DEFAULT true,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+INSERT INTO completion_signals (signal_text, signal_type, confidence) VALUES
+('已完成', 'exact', 1.0),
+('搞定了', 'exact', 1.0),
+('done', 'exact', 1.0),
+('✅', 'emoji', 0.9),
+('完成了', 'exact', 1.0),
+('解决了', 'exact', 0.9),
+('OK', 'exact', 0.7),
+('好的', 'exact', 0.6);
+
+COMMENT ON TABLE completion_signals IS '完成信号配置：用于自动检测任务完成';
+
+-- 隐性承诺识别模式配置表
+CREATE TABLE implicit_commitment_patterns (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    pattern_regex   VARCHAR(500) NOT NULL,
+    description     TEXT,
+    confidence      FLOAT DEFAULT 0.8,
+    is_active       BOOLEAN DEFAULT true,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+INSERT INTO implicit_commitment_patterns (pattern_regex, description, confidence) VALUES
+('我(回头|之后|明天|下周|尽快)', '自我承诺模式', 0.8),
+('(我|咱们)(需要|得|应该|要)', '需求表达模式', 0.7),
+('(记|写)一下', '记录意图模式', 0.6),
+('.*(前|之前).*(给|发|提交|完成)', '时间承诺模式', 0.9),
+('(计划|准备|打算)', '计划表达模式', 0.7);
+
+COMMENT ON TABLE implicit_commitment_patterns IS '隐性承诺识别模式：用于从聊天中识别隐含的承诺';
+
+-- =============================================================
+-- SECTION 16: 状态变迁追踪
+-- =============================================================
+
+-- 线索状态变迁表
+CREATE TABLE thread_state_transitions (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    thread_id       UUID NOT NULL REFERENCES topic_threads(id) ON DELETE CASCADE,
+    from_status     VARCHAR(50),
+    to_status       VARCHAR(50) NOT NULL,
+    triggered_by    VARCHAR(255),           -- 触发者 ldap_user_id
+    trigger_message_id UUID REFERENCES messages(id),
+    transition_type VARCHAR(50),            -- manual | auto_detected | timeout | signal_detected
+    notes           TEXT,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_thread_transitions ON thread_state_transitions(thread_id, created_at);
+CREATE INDEX idx_transitions_by_user ON thread_state_transitions(triggered_by);
+
+COMMENT ON TABLE thread_state_transitions IS '线索状态变迁：记录话题线索的完整生命周期';
+
+-- =============================================================
+-- SECTION 17: 协作网络
+-- =============================================================
+
+-- 协作关系表
+CREATE TABLE collaboration_relations (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    relation_type   VARCHAR(50) NOT NULL,
+    -- communication: frequent_collaborators, information_bridge, knowledge_expert
+    -- task_based: task_assigner, task_executor, reviewer
+    -- knowledge_based: knowledge_contributor, question_asker, answer_provider
+    user_id_a       VARCHAR(255) NOT NULL,  -- 源用户 ldap_user_id
+    user_id_b       VARCHAR(255) NOT NULL,  -- 目标用户 ldap_user_id
+    weight          FLOAT DEFAULT 1.0,
+    thread_id       UUID REFERENCES topic_threads(id),
+    room_id         UUID REFERENCES chat_rooms(id),
+    period_start    TIMESTAMPTZ,
+    period_end      TIMESTAMPTZ,
+    interaction_count INTEGER DEFAULT 1,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(relation_type, user_id_a, user_id_b, period_start)
+);
+
+CREATE INDEX idx_collab_users ON collaboration_relations(user_id_a, user_id_b);
+CREATE INDEX idx_collab_type ON collaboration_relations(relation_type);
+CREATE INDEX idx_collab_room ON collaboration_relations(room_id);
+CREATE INDEX idx_collab_thread ON collaboration_relations(thread_id);
+
+COMMENT ON TABLE collaboration_relations IS '协作关系：人与人之间的沟通、任务、知识关系网络';
+
+-- 关系权重配置
+CREATE TABLE relation_weights (
+    interaction_type    VARCHAR(100) PRIMARY KEY,
+    weight              FLOAT NOT NULL,
+    description         TEXT
+);
+
+INSERT INTO relation_weights VALUES
+('@mention', 3.0, '@提及'),
+('reply', 2.0, '回复消息'),
+('same_thread', 1.5, '共同参与话题'),
+('same_time', 0.5, '同时在线');
+
+COMMENT ON TABLE relation_weights IS '关系权重配置：用于计算协作关系强度';
+
+-- 用户协作统计视图
+CREATE VIEW user_collaboration_stats AS
+SELECT
+    user_id_a,
+    user_id_b,
+    relation_type,
+    SUM(interaction_count) AS total_interactions,
+    SUM(weight) AS total_weight,
+    COUNT(DISTINCT thread_id) AS shared_threads,
+    COUNT(DISTINCT room_id) AS shared_rooms
+FROM collaboration_relations
+GROUP BY user_id_a, user_id_b, relation_type;
+
+COMMENT ON VIEW user_collaboration_stats IS '用户协作统计：汇总用户间的协作关系';
+
+-- =============================================================
 -- END OF DDL
 -- =============================================================

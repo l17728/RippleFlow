@@ -4057,4 +4057,200 @@ wechat:
 
 ---
 
+## 28. 四大类信息分类架构（新增）
+
+### 28.1 概述
+
+根据专家审查报告建议，RippleFlow 采用**四大类信息分类架构**作为系统顶层分类标准：
+
+| 分类 | 含义 | 说明 |
+|------|------|------|
+| **knowledge** | 知识库 | FAQ、经验总结、术语规则、外部资源 |
+| **action** | 任务与待办 | 显性任务、隐性承诺、多步骤事项 |
+| **event** | 事件与线索 | 项目里程碑、问题处理全过程、决策过程 |
+| **collaboration** | 协作网络 | 沟通关系、任务关系、知识关系 |
+
+### 28.2 分层分类架构
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         顶层分类 (info_domain)                               │
+├───────────────────┬───────────────────┬───────────────────┬─────────────────┤
+│ 1. knowledge      │ 2. action         │ 3. event          │ 4. collaboration│
+│ 知识库            │ 任务与待办         │ 事件与线索         │ 协作网络         │
+├───────────────────┼───────────────────┼───────────────────┼─────────────────┤
+│ 二级分类:         │ 二级分类:          │ 二级分类:          │ 关系类型:        │
+│ • qa_faq          │ • action_item     │ • tech_decision   │ • 沟通关系       │
+│ • knowledge_share │   (增强隐性承诺)   │ • bug_incident    │ • 任务关系       │
+│ • reference_data  │                   │ • project_update  │ • 知识关系       │
+│ • env_config      │                   │ • discussion_notes│                 │
+└───────────────────┴───────────────────┴───────────────────┴─────────────────┘
+```
+
+### 28.3 与现有系统融合分析
+
+#### 知识库类 (Knowledge)
+
+| 维度 | 专家建议 | 现有系统 | 关系 |
+|------|----------|----------|------|
+| 分类 | FAQ、经验总结、术语规则、外部资源 | qa_faq, knowledge_share, reference_data, env_config | ✅ 匹配 |
+| 提取模板 | 详细的 Prompt 模板和触发关键词 | 已有 trigger_hints | 🔄 增强 |
+
+#### 任务与待办 (Action Items)
+
+| 维度 | 专家建议 | 现有系统 | 关系 |
+|------|----------|----------|------|
+| 显性任务 | @{person} {action} {deadline} | 已支持 | ✅ 匹配 |
+| 隐性承诺 | "我回头..."、"我会..." 自动识别 | ❌ 不支持 | 🆕 新增 |
+| 多步骤拆解 | 拆解项目计划为具体任务步骤 | ❌ 不支持 | 🆕 新增 |
+| 完成信号 | 自动检测"已完成"、"搞定了"、"done" | ❌ 不支持 | 🆕 新增 |
+
+#### 事件与线索 (Event Threads)
+
+| 维度 | 专家建议 | 现有系统 | 关系 |
+|------|----------|----------|------|
+| 分类 | 里程碑、问题处理、客户互动 | tech_decision, bug_incident, project_update | ✅ 匹配 |
+| 状态变迁追踪 | 线索状态变迁算法 | ❌ 只有最终状态 | 🆕 新增 |
+
+#### 协作网络 (Collaboration Graph)
+
+| 维度 | 专家建议 | 现有系统 | 关系 |
+|------|----------|----------|------|
+| 关系类型 | 沟通关系、任务关系、知识关系 | ❌ 不支持 | 🆕 新增 |
+| 权重计算 | @提及:3.0, 回复:2.0 | ❌ 不支持 | 🆕 新增 |
+
+### 28.4 隐性承诺识别
+
+```python
+class ImplicitCommitmentDetector:
+    """隐性承诺检测器"""
+
+    PATTERNS = [
+        (r'我(回头|之后|明天|下周|尽快)', 0.8),
+        (r'(我|咱们)(需要|得|应该|要)', 0.7),
+        (r'(记|写)一下', 0.6),
+        (r'.*(前|之前).*(给|发|提交|完成)', 0.9),
+        (r'(计划|准备|打算)', 0.7),
+    ]
+
+    async def detect(self, message: Message) -> Optional[ImplicitCommitment]:
+        """检测消息中的隐性承诺"""
+        for pattern, confidence in self.PATTERNS:
+            if re.search(pattern, message.content):
+                return ImplicitCommitment(
+                    message_id=message.id,
+                    pattern=pattern,
+                    confidence=confidence,
+                    status='identified'
+                )
+        return None
+```
+
+### 28.5 完成信号检测
+
+```python
+class CompletionSignalDetector:
+    """完成信号检测器"""
+
+    SIGNALS = {
+        'exact': ['已完成', '搞定了', 'done', '完成了', '解决了'],
+        'emoji': ['✅', '🎉', '💪'],
+    }
+
+    async def detect_completion(self, message: Message) -> Optional[CompletionSignal]:
+        """检测消息中的完成信号"""
+        content = message.content.strip()
+
+        if content in self.SIGNALS['exact']:
+            return CompletionSignal(signal=content, confidence=1.0, type='exact')
+
+        for emoji in self.SIGNALS['emoji']:
+            if emoji in content:
+                return CompletionSignal(signal=emoji, confidence=0.9, type='emoji')
+
+        return None
+```
+
+### 28.6 协作网络分析
+
+```yaml
+relation_types:
+  communication:           # 沟通关系
+    - frequent_collaborators    # 频繁协作
+    - information_bridge        # 信息桥梁
+    - knowledge_expert          # 领域专家
+
+  task_based:              # 任务关系
+    - task_assigner             # 任务分配者
+    - task_executor             # 任务执行者
+    - reviewer                  # 评审者
+
+  knowledge_based:         # 知识关系
+    - knowledge_contributor     # 知识贡献者
+    - question_asker            # 提问者
+    - answer_provider           # 解答者
+
+relation_weights:
+  @mention: 3.0
+  reply: 2.0
+  same_thread: 1.5
+  same_time: 0.5
+```
+
+### 28.7 API 接口
+
+```yaml
+/api/v1/info-domains:
+  get:
+    summary: 获取四大类定义
+
+/api/v1/actions/implicit:
+  get:
+    summary: 获取待确认的隐性承诺列表
+  post:
+    summary: 确认/忽略隐性承诺
+
+/api/v1/collaboration/network:
+  get:
+    summary: 获取协作网络图数据
+
+/api/v1/collaboration/experts:
+  get:
+    summary: 识别领域专家
+```
+
+### 28.8 前端导航分组
+
+```
+┌─────────────────────────────────────┐
+│ 📚 知识库                           │
+│    ├─ 问题解答 (qa_faq)            │
+│    ├─ 知识分享 (knowledge_share)   │
+│    ├─ 参考信息 (reference_data)    │
+│    └─ 环境配置 (env_config)        │
+├─────────────────────────────────────┤
+│ ✅ 任务与待办                       │
+│    ├─ 待确认 (隐性承诺)            │
+│    ├─ 进行中                        │
+│    └─ 已完成                        │
+├─────────────────────────────────────┤
+│ 🔀 事件与线索                       │
+│    ├─ 技术决策                      │
+│    ├─ 故障案例                      │
+│    ├─ 项目动态                      │
+│    └─ 讨论纪要                      │
+├─────────────────────────────────────┤
+│ 👥 协作网络                         │
+│    ├─ 关系图谱                      │
+│    └─ 领域专家                      │
+└─────────────────────────────────────┘
+```
+
+---
+
+**END OF DOCUMENT**
+```
+
+---
+
 **END OF DOCUMENT**

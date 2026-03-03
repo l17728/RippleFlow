@@ -964,6 +964,74 @@ components:
         description: { type: string, example: 微信导出的文本格式 }
         example: { type: string }
 
+    # ── 四大类信息域 ─────────────────────────────────────────────────────
+    InfoDomain:
+      type: object
+      properties:
+        code:
+          type: string
+          enum: [knowledge, action, event, collaboration]
+        display_name: { type: string, example: 知识库 }
+        description: { type: string }
+        icon: { type: string, example: book }
+        color: { type: string, example: blue }
+        categories:
+          type: array
+          items:
+            type: object
+            properties:
+              code: { type: string }
+              display_name: { type: string }
+              count: { type: integer }
+
+    # ── 隐性承诺 ─────────────────────────────────────────────────────────
+    ImplicitCommitment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        message_id: { type: string, format: uuid }
+        thread_id: { type: string, format: uuid }
+        room_id: { type: string, format: uuid }
+        room_name: { type: string }
+        content_preview: { type: string }
+        pattern_matched: { type: string }
+        confidence: { type: number }
+        commitment_status:
+          type: string
+          enum: [identified, confirmed, dismissed]
+        identified_at: { type: string, format: date-time }
+        confirmed_at:
+          type: string
+          format: date-time
+          nullable: true
+        action_item_id:
+          type: string
+          format: uuid
+          nullable: true
+        sender_id: { type: string }
+        sender_name: { type: string }
+
+    # ── 协作关系统计 ─────────────────────────────────────────────────────
+    CollaborationStats:
+      type: object
+      properties:
+        user_id: { type: string }
+        display_name: { type: string }
+        total_interactions: { type: integer }
+        top_collaborators:
+          type: array
+          items:
+            type: object
+            properties:
+              user_id: { type: string }
+              display_name: { type: string }
+              interaction_count: { type: integer }
+        roles:
+          type: array
+          items: { type: string }
+        knowledge_contributions: { type: integer }
+        tasks_completed: { type: integer }
+
     # ── 系统统计（已有）──────────────────────────────────────────────
     SystemStats:
       type: object
@@ -3118,6 +3186,334 @@ paths:
           description: 任务不存在
         '409':
           description: 任务已完成，无法取消
+
+  # ════════════════════════════════════════════════════
+  # INFO DOMAINS (四大类信息分类)
+  # ════════════════════════════════════════════════════
+
+  /api/v1/info-domains:
+    get:
+      tags: [info-domains]
+      summary: 获取四大类信息域定义
+      description: |
+        返回系统顶层分类标准（四大类）及其下属的二级分类。
+
+        **四大类**：
+        - knowledge: 知识库（FAQ、经验总结、术语规则、外部资源）
+        - action: 任务与待办（显性任务、隐性承诺、多步骤事项）
+        - event: 事件与线索（项目里程碑、问题处理、决策过程）
+        - collaboration: 协作网络（沟通关系、任务关系、知识关系）
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  domains:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/InfoDomain'
+
+  /api/v1/threads:
+    get:
+      tags: [threads]
+      summary: 查询话题线索
+      description: |
+        支持按四大类（info_domain）或二级分类（category）过滤。
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: domain
+          schema:
+            type: string
+            enum: [knowledge, action, event, collaboration]
+          description: 按四大类过滤
+        - in: query
+          name: category
+          schema: { type: string }
+          description: 按二级分类过滤
+        - in: query
+          name: room_id
+          schema: { type: string }
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [active, resolved, dormant, merged]
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/TopicThread' }
+                  total: { type: integer }
+
+  # ════════════════════════════════════════════════════
+  # IMPLICIT COMMITMENTS (隐性承诺)
+  # ════════════════════════════════════════════════════
+
+  /api/v1/actions/implicit:
+    get:
+      tags: [actions]
+      summary: 获取待确认的隐性承诺列表
+      description: |
+        隐性承诺是从聊天中自动识别的承诺表达，如"我回头..."、"我会..."。
+
+        需要用户确认后才会转化为正式任务。
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [identified, confirmed, dismissed, all]
+          default: identified
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/ImplicitCommitment' }
+                  total: { type: integer }
+
+  /api/v1/actions/implicit/{id}/confirm:
+    post:
+      tags: [actions]
+      summary: 确认隐性承诺
+      description: 确认后隐性承诺将转化为正式任务
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                assignee_id:
+                  type: string
+                  description: 指派给谁（可选，默认自己）
+                due_date:
+                  type: string
+                  format: date-time
+                  description: 截止时间（可选）
+                notes:
+                  type: string
+                  description: 备注
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: confirmed }
+                  action_item_id: { type: string, format: uuid }
+        '404':
+          description: 隐性承诺不存在
+        '409':
+          description: 已确认或已忽略
+
+  /api/v1/actions/implicit/{id}/dismiss:
+    post:
+      tags: [actions]
+      summary: 忽略隐性承诺
+      description: 标记为误识别，不再提醒
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  description: 忽略原因
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: dismissed }
+        '404':
+          description: 隐性承诺不存在
+        '409':
+          description: 已确认或已忽略
+
+  # ════════════════════════════════════════════════════
+  # COLLABORATION NETWORK (协作网络)
+  # ════════════════════════════════════════════════════
+
+  /api/v1/collaboration/network:
+    get:
+      tags: [collaboration]
+      summary: 获取协作网络图数据
+      description: |
+        返回用户之间的协作关系网络，用于可视化展示。
+
+        **关系类型**：
+        - communication: 沟通关系（频繁协作、信息桥梁、领域专家）
+        - task_based: 任务关系（任务分配者、执行者、评审者）
+        - knowledge_based: 知识关系（知识贡献者、提问者、解答者）
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: room_id
+          schema: { type: string }
+          description: 限定群组范围
+        - in: query
+          name: relation_type
+          schema:
+            type: string
+            enum: [communication, task_based, knowledge_based, all]
+          default: all
+        - in: query
+          name: time_range
+          schema:
+            type: string
+            enum: [7d, 30d, 90d, all]
+          default: 30d
+        - in: query
+          name: min_weight
+          schema: { type: number, default: 1.0 }
+          description: 最小关系权重，过滤弱关系
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  nodes:
+                    type: array
+                    description: 用户节点
+                    items:
+                      type: object
+                      properties:
+                        user_id: { type: string }
+                        display_name: { type: string }
+                        total_weight: { type: number }
+                        roles:
+                          type: array
+                          items: { type: string }
+                  edges:
+                    type: array
+                    description: 关系边
+                    items:
+                      type: object
+                      properties:
+                        source: { type: string }
+                        target: { type: string }
+                        relation_type: { type: string }
+                        weight: { type: number }
+                        interaction_count: { type: integer }
+
+  /api/v1/collaboration/experts:
+    get:
+      tags: [collaboration]
+      summary: 识别领域专家
+      description: |
+        根据回答问题数量、知识贡献等指标识别领域专家。
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: domain
+          schema: { type: string }
+          description: 知识领域（如 knowledge）
+        - in: query
+          name: category
+          schema: { type: string }
+          description: 二级分类（如 qa_faq）
+        - in: query
+          name: limit
+          schema: { type: integer, default: 10 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  experts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        user_id: { type: string }
+                        display_name: { type: string }
+                        answered_count: { type: integer }
+                        avg_impact: { type: number }
+                        expertise_areas:
+                          type: array
+                          items: { type: string }
+
+  /api/v1/collaboration/user/{user_id}/stats:
+    get:
+      tags: [collaboration]
+      summary: 获取用户协作统计
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: user_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user_id: { type: string }
+                  display_name: { type: string }
+                  total_interactions: { type: integer }
+                  top_collaborators:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        user_id: { type: string }
+                        display_name: { type: string }
+                        interaction_count: { type: integer }
+                  roles:
+                    type: array
+                    items: { type: string }
+                  knowledge_contributions: { type: integer }
+                  tasks_completed: { type: integer }
 
 security:
   - cookieAuth: []
