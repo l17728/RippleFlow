@@ -1,12 +1,55 @@
-# RippleFlow AI 管家 nullclaw 对接配置
+# RippleFlow nullclaw 对接配置
 
 ## 概述
 
 | 项目 | 值 |
 |------|------|
 | 创建日期 | 2026-03-03 |
-| 目标 | 将 RippleFlow AI 管家对接到 nullclaw 框架 |
+| 更新日期 | 2026-03-03 |
+| 目标 | 将 RippleFlow 与 nullclaw 框架对接 |
 | nullclaw 版本 | 2026.3.x |
+| 架构版本 | v2.0（策略由 nullclaw 提供） |
+
+### 核心设计理念
+
+**策略与机制分离**：
+- **RippleFlow 平台**：只暴露能力（API + CLI），不包含任何策略逻辑
+- **nullclaw**：负责所有智能逻辑（Routine 脚本、LLM 决策、自省学习）
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    架构关系图                                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │               RippleFlow 平台（机制）                    │   │
+│  │                                                         │   │
+│  │  能力暴露：                                              │   │
+│  │  ├── REST API（HTTP 接口）                              │   │
+│  │  └── CLI 命令（Shell 接口）                              │   │
+│  │                                                         │   │
+│  │  数据库：SQLite / PostgreSQL                            │   │
+│  │  缓存：内存缓存 / Redis                                  │   │
+│  │                                                         │   │
+│  │  不包含：                                                │   │
+│  │  ❌ 规则引擎                                             │   │
+│  │  ❌ Routine 脚本                                         │   │
+│  │  ❌ 策略决策逻辑                                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                              ↑                                  │
+│                              │ rf help / rf <command>           │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                   nullclaw                               │   │
+│  │                                                         │   │
+│  │  智能逻辑：                                              │   │
+│  │  ├── Routine 脚本（固化逻辑）                           │   │
+│  │  ├── LLM 智能层（灵活决策）                             │   │
+│  │  ├── 自省学习（持续优化）                               │   │
+│  │  └── 定时任务（周期调度）                               │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -33,9 +76,9 @@
 │  │  │   └── originals/        ← 压缩原文                    │   │
 │  │  │                                                      │   │
 │  │  ├── prompts/              ← 提示词分级                  │   │
-│  │  │   ├── IDENTITY.md       ← core/identity              │   │
-│  │  │   ├── DUTIES.md         ← duties/*                   │   │
-│  │  │   └── SKILLS.md         ← skills/*                   │   │
+│  │  │   ├── IDENTITY.md       ← 核心身份                   │   │
+│  │  │   ├── ROUTINES/         ← Routine 脚本               │   │
+│  │  │   └── SKILLS.md         ← 技能模板                   │   │
 │  │  │                                                      │   │
 │  │  └── insights/             ← 自省沉淀                    │   │
 │  │      ├── daily/            ← 每日自省                    │   │
@@ -45,11 +88,16 @@
 │  ┌─────────────────────────────────────────────────────────┐   │
 │  │                    nullclaw 核心                          │   │
 │  │                                                          │   │
-│  │  Channels:          Tools:           Cron:               │   │
-│  │  - dingtalk         - sensitive_*     - daily_reflection │   │
-│  │  - lark             - todo_*          - weekly_review    │   │
-│  │  - web              - thread_*        - monthly_evolve   │   │
-│  │                     - butler_*                            │   │
+│  │  工作流程：                                              │   │
+│  │  1. rf help                    → 查询可用命令            │   │
+│  │  2. rf <command> --help        → 查询命令详情            │   │
+│  │  3. rf <command> [args]        → 执行操作                │   │
+│  │                                                          │   │
+│  │  Channels:           Cron:              Tools:            │   │
+│  │  - dingtalk          - daily_digest     - shell_execute   │   │
+│  │  - lark              - weekly_review    - http_request    │   │
+│  │  - web               - todo_reminder    - file_*          │   │
+│  │                      - butler_reflect                      │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
@@ -57,12 +105,94 @@
 
 ---
 
-## 二、config.json 配置
+## 二、CLI 命令调用方式
+
+### 2.1 nullclaw 调用流程
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    nullclaw 调用 RippleFlow                     │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Step 1: 发现能力                                              │
+│  ─────────────────                                             │
+│  $ rf help                                                     │
+│                                                                 │
+│  输出：                                                         │
+│  命令:                                                          │
+│    auth          认证与会话                                     │
+│    threads       话题线索管理                                   │
+│    search        全文搜索                                       │
+│    qa            智能问答                                       │
+│    todos         个人待办管理                                   │
+│    actions       群聊任务管理                                   │
+│    sensitive     敏感授权处理                                   │
+│    ...                                                          │
+│                                                                 │
+│  Step 2: 查询详情                                              │
+│  ─────────────────                                             │
+│  $ rf threads search --help                                     │
+│                                                                 │
+│  输出：                                                         │
+│  用法: rf threads search <query> [options]                      │
+│  选项:                                                          │
+│    --category <cat>    限定类别                                │
+│    --domain <domain>   限定四大类                              │
+│    --size <n>          结果数量                                │
+│                                                                 │
+│  Step 3: 执行命令                                              │
+│  ─────────────────                                             │
+│  $ rf threads search "Redis配置" --category qa_faq -o json      │
+│                                                                 │
+│  输出：                                                         │
+│  {                                                              │
+│    "results": [...],                                            │
+│    "total": 5                                                   │
+│  }                                                              │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 2.2 核心 CLI 命令速查
+
+| 命令 | 说明 | 示例 |
+|------|------|------|
+| `rf help` | 查询所有命令 | `rf help` |
+| `rf <cmd> --help` | 查询命令详情 | `rf threads --help` |
+| `rf threads list` | 列出话题 | `rf threads list --category qa_faq` |
+| `rf threads search` | 搜索话题 | `rf threads search "Redis"` |
+| `rf qa` | 智能问答 | `rf qa "如何配置连接池"` |
+| `rf todos list` | 列出待办 | `rf todos list --overdue` |
+| `rf todos add` | 创建待办 | `rf todos add "完成文档" --due 2026-03-10` |
+| `rf sensitive pending` | 待授权列表 | `rf sensitive pending` |
+| `rf sensitive decide` | 提交决策 | `rf sensitive decide <id> --decision approve` |
+| `rf butler digest` | 生成快报 | `rf butler digest --room <id> --type daily` |
+
+### 2.3 nullclaw Shell Tool 配置
+
+```json
+{
+  "tools": {
+    "enabled": ["shell_execute", "http_request", "file_read", "file_write"],
+
+    "shell_execute": {
+      "allowed_commands": ["rf"],
+      "working_directory": "/path/to/rippleflow",
+      "timeout": 30000,
+      "max_output_size": 65536
+    }
+  }
+}
+```
+
+---
+
+## 三、config.json 配置
 
 ```json
 {
   "$schema": "https://nullclaw.ai/schema/config.json",
-  "version": "2026.3.1",
+  "version": "2026.3.2",
 
   "models": {
     "default_provider": "zhipu",
@@ -87,7 +217,13 @@
       "max_history_messages": 100,
       "max_tool_iterations": 50,
       "temperature": 0.7,
-      "workspace_dir": ".rippleflow"
+      "workspace_dir": ".rippleflow",
+
+      "shell": {
+        "enabled": true,
+        "allowed_commands": ["rf"],
+        "working_directory": "${RIPPLEFLOW_HOME}"
+      }
     }
   },
 
@@ -105,11 +241,6 @@
         "enabled": true,
         "schedule": "0 3 * * 0"
       }
-    },
-    "retrieval": {
-      "mode": "hybrid",
-      "fts_weight": 0.6,
-      "semantic_weight": 0.4
     }
   },
 
@@ -137,24 +268,15 @@
 
   "tools": {
     "enabled": [
-      "sensitive_escalate",
-      "sensitive_notify",
-      "todo_reminder",
-      "todo_overdue",
-      "thread_notify",
-      "thread_drift",
-      "digest_daily",
-      "digest_weekly",
-      "butler_reflect",
-      "butler_evolve",
-      "knowledge_extract",
-      "collaboration_analyze"
+      "shell_execute",
+      "http_request",
+      "file_read",
+      "file_write"
     ],
 
-    "permissions": {
-      "L1": ["thread_notify", "todo_reminder", "sensitive_notify"],
-      "L2": ["sensitive_escalate", "digest_daily", "digest_weekly"],
-      "L3": ["butler_reflect", "butler_evolve", "knowledge_extract"]
+    "shell_execute": {
+      "allowed_commands": ["rf"],
+      "timeout": 30000
     }
   },
 
@@ -162,32 +284,39 @@
     "enabled": true,
     "jobs": [
       {
-        "name": "daily_reflection",
-        "schedule": "0 23 * * *",
-        "tool": "butler_reflect",
+        "name": "daily_digest",
+        "schedule": "0 9 * * 1-5",
+        "prompt": "生成每日快报并发送到群",
         "agent": "rippleflow_butler"
       },
       {
         "name": "weekly_review",
         "schedule": "0 9 * * 1",
-        "tool": "digest_weekly",
+        "prompt": "生成每周周报并发送到群",
+        "agent": "rippleflow_butler"
+      },
+      {
+        "name": "todo_reminder",
+        "schedule": "0 9 * * 1-5",
+        "prompt": "检查今日到期的待办，提醒相关人员",
+        "agent": "rippleflow_butler"
+      },
+      {
+        "name": "sensitive_check",
+        "schedule": "0 10 * * *",
+        "prompt": "检查是否有超过7天未处理的敏感授权，执行升级流程",
+        "agent": "rippleflow_butler"
+      },
+      {
+        "name": "daily_reflection",
+        "schedule": "0 23 * * *",
+        "prompt": "回顾今日处理的消息，识别遗漏或错误，记录改进点",
         "agent": "rippleflow_butler"
       },
       {
         "name": "monthly_evolution",
         "schedule": "0 9 1 * *",
-        "tool": "butler_evolve",
-        "agent": "rippleflow_butler"
-      },
-      {
-        "name": "daily_compact",
-        "schedule": "0 2 * * *",
-        "action": "memory_compact"
-      },
-      {
-        "name": "todo_morning_reminder",
-        "schedule": "0 9 * * 1-5",
-        "tool": "todo_reminder",
+        "prompt": "分析本月运营数据，提出系统优化建议",
         "agent": "rippleflow_butler"
       }
     ]
@@ -199,24 +328,12 @@
       "code_length": 6,
       "expiry_seconds": 300
     },
-    "sandbox": {
-      "enabled": false
-    },
     "audit": {
       "enabled": true,
       "log_path": ".rippleflow/logs/audit.log",
       "reflection_audit": {
         "enabled": true,
         "log_path": ".rippleflow/logs/reflection_audit.log",
-        "include_fields": [
-          "timestamp",
-          "reflection_type",
-          "improvement_category",
-          "improvement_detail",
-          "affected_components",
-          "proposed_action",
-          "confidence"
-        ],
         "retention_days": 365
       }
     }
@@ -244,9 +361,127 @@
 
 ---
 
-## 三、提示词文件
+## 四、Routine 脚本示例
 
-### 3.1 IDENTITY.md（核心身份）
+### 4.1 敏感授权升级 Routine
+
+```markdown
+# routine_sensitive_escalation.md
+
+## 触发条件
+- 定时任务：每天 10:00
+- 条件：授权请求创建超过 7 天且状态为 pending
+
+## 执行步骤
+
+1. 查询待升级的敏感授权
+   ```bash
+   rf sensitive pending --days 7 -o json
+   ```
+
+2. 对每条记录执行升级
+   ```bash
+   rf admin sensitive escalate --auth-id <auth_id>
+   ```
+
+3. 通知管理员
+   ```bash
+   rf notifications send --to admin --title "敏感授权升级" --content "..."
+   ```
+
+## 输出
+- 升级成功：返回 {success: true}
+- 升级失败：返回 {success: false, error: reason}
+```
+
+### 4.2 待办提醒 Routine
+
+```markdown
+# routine_todo_reminder.md
+
+## 触发条件
+- 定时任务：每天 9:00（工作日）
+
+## 执行步骤
+
+1. 查询今日到期的待办
+   ```bash
+   rf todos list --due-today --status open -o json
+   ```
+
+2. 按责任人分组
+
+3. 发送提醒
+   ```bash
+   rf notifications send --to <user_id> --title "待办提醒" --content "..."
+   ```
+
+## 输出
+- 提醒成功：返回 {reminded_count: N}
+```
+
+### 4.3 每日快报 Routine
+
+```markdown
+# routine_daily_digest.md
+
+## 触发条件
+- 定时任务：每天 9:00（工作日）
+
+## 执行步骤
+
+1. 获取昨日话题摘要
+   ```bash
+   rf threads list --from yesterday --to today --size 20 -o json
+   ```
+
+2. 生成快报内容（LLM）
+
+3. 推送到群
+   ```bash
+   rf butler digest --room <room_id> --type daily
+   ```
+
+## 输出
+- 快报已发送
+```
+
+### 4.4 自省 Routine
+
+```markdown
+# routine_reflection.md
+
+## 触发条件
+- 定时任务：每天 23:00
+
+## 执行步骤
+
+1. 回顾今日处理的消息
+   ```bash
+   rf threads list --from today --size 50 -o json
+   rf todos list --created-today -o json
+   rf qa stats --today -o json
+   ```
+
+2. 分析遗漏和错误
+   - 检查是否有未分类的消息
+   - 检查是否有遗漏的隐性承诺
+   - 检查问答反馈中的负面评价
+
+3. 记录改进点
+   ```bash
+   rf butler reflect --notes "..." --save
+   ```
+
+## 输出
+- 自省报告已保存到 insights/daily/
+```
+
+---
+
+## 五、提示词文件
+
+### 5.1 IDENTITY.md（核心身份）
 
 ```markdown
 # RippleFlow AI 管家
@@ -254,6 +489,25 @@
 ## 身份
 
 你是 RippleFlow 群聊知识库的 AI 管家，负责将群聊历史转化为可问答的活知识库。
+
+## 能力发现
+
+你可以通过以下方式发现系统所有能力：
+
+1. **查询可用命令**
+   ```
+   rf help
+   ```
+
+2. **查询命令详情**
+   ```
+   rf <command> --help
+   ```
+
+3. **执行命令**
+   ```
+   rf <command> [options]
+   ```
 
 ## 核心职责
 
@@ -288,283 +542,24 @@
 - `insights/*.md` - 自省沉淀
 
 使用 `@file <path>` 查看文件内容。
+
+## 执行示例
+
+当需要查询话题时：
+```bash
+rf threads search "Redis配置" --category qa_faq -o json
 ```
 
-### 3.2 DUTIES.md（职责定义）
-
-```markdown
-# 管家职责定义
-
-## 1. 消息处理流程
-
-当收到群消息时：
-1. 分析消息类型（问题/决策/任务/闲聊）
-2. 提取关键信息（参与者、时间、关键词）
-3. 关联现有话题或创建新话题
-4. 更新话题摘要
-5. 检测待办事项和隐性承诺
-
-## 2. 敏感信息处理
-
-当检测到敏感信息时：
-1. 识别敏感类型（密码/密钥/个人信息）
-2. 创建授权请求
-3. 通知相关当事人
-4. 7天无响应 → 升级管理员
-
-## 3. 任务跟踪
-
-对于识别到的任务：
-1. 确认责任人和截止时间
-2. 添加到任务列表
-3. 截止前提醒责任人
-4. 检测完成信号更新状态
-
-## 4. 知识沉淀
-
-对于有价值的讨论：
-1. 提取核心结论
-2. 归类到对应分类
-3. 更新知识图谱
-4. 定期生成摘要
-
-## 5. 自省机制
-
-每日 23:00：
-- 回顾当日处理的消息
-- 识别遗漏或错误
-- 记录改进点
-
-每周一 9:00：
-- 汇总本周知识沉淀
-- 分析热点话题
-- 建议优化方向
+当需要创建待办时：
+```bash
+rf todos add "完成部署文档" --due 2026-03-10 --priority high
 ```
 
-### 3.3 SKILLS.md（技能模板）
-
-```markdown
-# 管家技能
-
-## 1. 隐性承诺识别
-
-检测模式：
-- "我回头..."
-- "我会..."
-- "计划下周..."
-- "周三前..."
-
-处理：创建待确认任务，24小时内确认。
-
-## 2. 完成信号检测
-
-检测信号：
-- "已完成"
-- "搞定了"
-- "done"
-- "✅"
-
-处理：自动更新相关任务状态为已完成。
-
-## 3. 多步骤任务拆解
-
-当检测到复杂任务时：
-1. 识别任务边界
-2. 拆解为子任务
-3. 分配责任人和时间
-4. 建立依赖关系
-
-## 4. 知识图谱更新
-
-从话题中提取：
-- 实体（人、技术、项目）
-- 关系（使用、负责、参与）
-- 属性（时间、状态、优先级）
-
-## 5. 协作网络分析
-
-定期分析：
-- 互动频率
-- 问答关系
-- 任务分配模式
-
-识别领域专家和信息桥梁。
+当需要处理敏感授权时：
+```bash
+rf sensitive pending
+rf sensitive decide <auth_id> --decision approve
 ```
-
----
-
-## 四、Memory 文件布局
-
-### 4.1 MEMORY.md（L3 核心层）
-
-```markdown
-# RippleFlow 知识库核心
-
-## 技术栈
-
-| 技术 | 用途 | 负责人 |
-|------|------|--------|
-| FastAPI | 后端框架 | 张三 |
-| PostgreSQL | 主数据库 | 李四 |
-| Redis | 缓存 | 王五 |
-
-## 关键决策
-
-### 2026-03-01: Redis 集群架构
-- 决策：采用 3主3从 + Sentinel
-- 参与者：张三、李四
-- 状态：已完成
-
-### 2026-02-15: API 规范
-- 决策：RESTful + OpenAPI 3.0
-- 参与者：全体
-- 状态：已完成
-
-## 术语词典
-
-| 术语 | 定义 |
-|------|------|
-| 话题线索 | Topic Thread，一条有价值的讨论线索 |
-| 活摘要 | Living Summary，随消息更新的话题摘要 |
-| 隐性承诺 | 从聊天中识别的非明确任务承诺 |
-
-## 专家网络
-
-| 领域 | 专家 | 置信度 |
-|------|------|--------|
-| Redis | 张三 | 0.95 |
-| PostgreSQL | 李四 | 0.9 |
-| Python | 王五 | 0.85 |
-```
-
-### 4.2 memory/2026-03-03.md（L1 活跃层）
-
-```markdown
-# 2026-03-03 话题记录
-
-## 话题: Redis 集群部署进度
-
-**分类**: tech_decision
-**状态**: active
-**参与者**: 张三、李四、王五
-
-### 摘要
-今天完成了 Redis 集群的服务器申请，预计本周完成部署。
-
-### 消息记录
-
-**09:15 张三**:
-服务器申请已提交，等待运维审批。
-
-**10:30 李四**:
-提醒：审批通常需要 1-2 天，建议提前准备部署脚本。
-
-**14:00 王五**:
-部署脚本已准备好，在 docs/scripts/redis-cluster.sh
-
-### 待办事项
-- [ ] 服务器审批（张三，周三前）
-- [ ] 准备监控告警（王五）
-
----
-
-## 话题: API 接口规范补充
-
-**分类**: discussion_notes
-**状态**: resolved
-
-### 摘要
-补充了分页接口的统一规范。
-
-### 决策
-1. 分页参数：page, size
-2. 返回格式：items, total, page, size
-```
-
----
-
-## 五、Tools 定义
-
-### 5.1 sensitive_escalate Tool
-
-```zig
-// src/tools/sensitive_escalate.zig
-
-const std = @import("std");
-const Tool = @import("../tools/root.zig").Tool;
-const JsonObjectMap = std.json.ObjectMap;
-
-pub const SensitiveEscalateTool = struct {
-    pub fn execute(
-        args: JsonObjectMap,
-        allocator: std.mem.Allocator
-    ) !ToolResult {
-        // 获取参数
-        const thread_id = args.get("thread_id").?.string;
-        const days_pending = args.get("days_pending").?.integer;
-
-        // L2 权限操作：升级敏感信息到管理员
-        // 实现逻辑...
-
-        return ToolResult{
-            .success = true,
-            .output = "Sensitive content escalated to admin",
-        };
-    }
-
-    pub fn name() []const u8 {
-        return "sensitive_escalate";
-    }
-
-    pub fn description() []const u8 {
-        return "升级敏感信息到管理员（L2权限）";
-    }
-
-    pub fn parametersJson(allocator: std.mem.Allocator) ![]u8 {
-        return std.fmt.allocPrint(allocator,
-            \\{{
-            \\  "type": "object",
-            \\  "properties": {{
-            \\    "thread_id": {{"type": "string", "format": "uuid"}},
-            \\    "days_pending": {{"type": "integer"}}
-            \\  }},
-            \\  "required": ["thread_id"]
-            \\}}
-        , .{});
-    }
-};
-```
-
-### 5.2 butler_reflect Tool
-
-```zig
-// src/tools/butler_reflect.zig
-
-pub const ButlerReflectTool = struct {
-    pub fn execute(
-        args: JsonObjectMap,
-        allocator: std.mem.Allocator
-    ) !ToolResult {
-        // 每日自省逻辑
-        // 1. 回顾今日消息
-        // 2. 识别遗漏/错误
-        // 3. 生成改进建议
-        // 4. 写入 insights/daily/
-
-        return ToolResult{
-            .success = true,
-            .output = "Daily reflection completed",
-        };
-    }
-
-    pub fn name() []const u8 {
-        return "butler_reflect";
-    }
-
-    pub fn description() []const u8 {
-        return "AI管家每日自省";
-    }
-};
 ```
 
 ---
@@ -573,7 +568,11 @@ pub const ButlerReflectTool = struct {
 
 ```bash
 # 初始化 workspace
-mkdir -p .rippleflow/{memory,archive/{summaries,originals},prompts,insights/{daily,weekly}}
+mkdir -p .rippleflow/{memory,archive/{summaries,originals},prompts/ROUTINES,insights/{daily,weekly}}
+
+# 设置环境变量
+export RIPPLEFLOW_HOME=/path/to/rippleflow
+export ZHIPU_API_KEY=your_api_key
 
 # 启动 gateway 模式（接收 webhook）
 nullclaw gateway --config .rippleflow/config.json
@@ -604,24 +603,23 @@ nullclaw service --config .rippleflow/config.json
 │                                   │   nullclaw agent        │  │
 │                                   │   (AI管家)              │  │
 │                                   │                         │  │
-│                                   │   - 处理消息            │  │
-│                                   │   - 更新 Memory         │  │
-│                                   │   - 触发 Tools          │  │
+│                                   │   能力发现：            │  │
+│                                   │   rf help               │  │
+│                                   │                         │  │
+│                                   │   能力调用：            │  │
+│                                   │   rf <command> [args]   │  │
 │                                   └───────────┬─────────────┘  │
 │                                               │                │
 │                                               ▼                │
 │  ┌─────────────────────────────────────────────────────────┐   │
 │  │                   RippleFlow 后端                        │   │
 │  │                                                         │   │
-│  │  PostgreSQL:                                            │   │
-│  │  - topic_threads (与 memory/*.md 同步)                  │   │
-│  │  - action_items                                         │   │
-│  │  - sensitive_authorizations                             │   │
+│  │  能力暴露：                                              │   │
+│  │  ├── REST API :8080                                    │   │
+│  │  └── CLI 命令 (rf)                                      │   │
 │  │                                                         │   │
-│  │  API Server:8080                                        │   │
-│  │  - 查询接口                                             │   │
-│  │  - 管理接口                                             │   │
-│  │  - 知识图谱查询                                         │   │
+│  │  数据库：SQLite / PostgreSQL                            │   │
+│  │  缓存：内存缓存 / Redis                                  │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                                                                 │
 └─────────────────────────────────────────────────────────────────┘
@@ -629,41 +627,20 @@ nullclaw service --config .rippleflow/config.json
 
 ---
 
-## 八、同步机制
-
-### 8.1 Memory ↔ PostgreSQL 同步
-
-```python
-# sync_service.py
-
-class MemorySyncService:
-    """Memory 文件与 PostgreSQL 同步"""
-
-    async def sync_to_db(self):
-        """将 Memory 文件同步到数据库"""
-        # 1. 读取 memory/*.md 文件
-        # 2. 解析话题结构
-        # 3. 更新 topic_threads 表
-        # 4. 更新知识图谱
-        pass
-
-    async def sync_from_db(self):
-        """将数据库同步到 Memory 文件"""
-        # 1. 查询 topic_threads
-        # 2. 生成 memory/YYYY-MM-DD.md
-        pass
-```
-
----
-
-## 九、环境变量
+## 八、环境变量
 
 ```bash
 # .env
+RIPPLEFLOW_HOME=/path/to/rippleflow
+
+# LLM
 ZHIPU_API_KEY=your_zhipu_api_key
+
+# Channels
 DINGTALK_APP_KEY=your_dingtalk_app_key
 DINGTALK_APP_SECRET=your_dingtalk_app_secret
 DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?access_token=xxx
+
 LARK_APP_ID=your_lark_app_id
 LARK_APP_SECRET=your_lark_app_secret
 LARK_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
@@ -671,17 +648,27 @@ LARK_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
 
 ---
 
-## 十、验证清单
+## 九、验证清单
 
 - [ ] nullclaw 编译成功 (`zig build`)
 - [ ] 测试通过 (`zig build test --summary all`)
 - [ ] 配置文件加载成功
 - [ ] Memory 文件创建成功
+- [ ] CLI 命令可用 (`rf help`)
 - [ ] Channel 连接成功（钉钉/飞书）
-- [ ] Tool 执行成功
+- [ ] Routine 脚本执行成功
 - [ ] Cron 任务调度成功
 
 ---
 
-**文档版本**: v1.0
-**创建时间**: 2026-03-03
+## 十、变更历史
+
+| 版本 | 日期 | 变更内容 |
+|------|------|----------|
+| v1.0 | 2026-03-03 | 初始版本 |
+| v2.0 | 2026-03-03 | 架构调整：策略由 nullclaw 提供，新增 CLI 调用方式 |
+
+---
+
+**文档版本**: v2.0
+**更新时间**: 2026-03-03
