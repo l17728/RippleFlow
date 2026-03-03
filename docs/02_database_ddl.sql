@@ -1456,5 +1456,139 @@ CREATE INDEX idx_tool_failed ON butler_tool_calls(tool_name) WHERE success = fal
 COMMENT ON TABLE butler_tool_calls IS '管家工具调用日志：记录Agent所有工具调用';
 
 -- =============================================================
+-- SECTION 24: 多平台适配器表
+-- =============================================================
+
+-- 平台群组映射表
+CREATE TABLE platform_rooms (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    platform        VARCHAR(50) NOT NULL,   -- wechat | feishu | dingtalk | custom
+    platform_room_id VARCHAR(255) NOT NULL,
+    room_id         UUID REFERENCES chat_rooms(id),
+
+    room_name       VARCHAR(500),
+    room_type       VARCHAR(50),            -- group | private
+
+    -- 同步状态
+    sync_enabled    BOOLEAN DEFAULT true,
+    last_sync_at    TIMESTAMPTZ,
+    last_message_id VARCHAR(500),
+
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW(),
+
+    UNIQUE(platform, platform_room_id)
+);
+
+-- 平台用户映射表
+CREATE TABLE platform_users (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    platform        VARCHAR(50) NOT NULL,
+    platform_user_id VARCHAR(255) NOT NULL,
+    user_id         UUID REFERENCES chat_users(id),
+
+    display_name    VARCHAR(500),
+    avatar_url      VARCHAR(1000),
+
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW(),
+
+    UNIQUE(platform, platform_user_id)
+);
+
+CREATE INDEX idx_platform_rooms ON platform_rooms(platform, platform_room_id);
+CREATE INDEX idx_platform_rooms_sync ON platform_rooms(platform, sync_enabled) WHERE sync_enabled = true;
+CREATE INDEX idx_platform_users ON platform_users(platform, platform_user_id);
+
+COMMENT ON TABLE platform_rooms IS '平台群组映射：多平台群组与系统群组的对应关系';
+COMMENT ON TABLE platform_users IS '平台用户映射：多平台用户与系统用户的对应关系';
+
+-- =============================================================
+-- SECTION 25: 批量导入表
+-- =============================================================
+
+-- 导入任务表
+CREATE TABLE import_jobs (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    platform        VARCHAR(50) NOT NULL,   -- wechat | feishu | dingtalk | custom
+    room_id         VARCHAR(255) NOT NULL,  -- 目标群组ID
+
+    -- 文件信息
+    file_name       VARCHAR(500),
+    file_path       VARCHAR(1000),
+    file_size       BIGINT,
+    file_format     VARCHAR(50),            -- wechat_txt | json | csv | ...
+
+    -- 进度信息
+    total_count     INTEGER DEFAULT 0,
+    processed_count INTEGER DEFAULT 0,
+    failed_count    INTEGER DEFAULT 0,
+    skipped_count   INTEGER DEFAULT 0,
+
+    -- 状态
+    status          VARCHAR(50) DEFAULT 'pending',  -- pending | parsing | processing | completed | failed | cancelled
+
+    -- 时间范围
+    time_range_start TIMESTAMPTZ,
+    time_range_end   TIMESTAMPTZ,
+
+    -- 导入选项
+    options         JSONB DEFAULT '{}',
+    -- {
+    --   "time_scale": 1.0,        -- 时间加速因子
+    --   "skip_noise": true,       -- 跳过噪声消息
+    --   "batch_size": 100,        -- 批处理大小
+    --   "reprocess": false        -- 是否重新处理已存在的消息
+    -- }
+
+    -- 结果统计
+    result_summary  JSONB DEFAULT '{}',
+    -- {
+    --   "threads_created": 15,
+    --   "threads_updated": 8,
+    --   "action_items_created": 5,
+    --   "decisions_created": 3,
+    --   "errors": [...]
+    -- }
+
+    -- 时间信息
+    started_at      TIMESTAMPTZ,
+    completed_at    TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    created_by      VARCHAR(255) NOT NULL
+);
+
+-- 导入消息记录表
+CREATE TABLE import_message_logs (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    job_id          UUID NOT NULL REFERENCES import_jobs(id) ON DELETE CASCADE,
+
+    -- 消息信息
+    platform_message_id VARCHAR(500),
+    sender_id       VARCHAR(255),
+    sender_name     VARCHAR(255),
+    content_preview TEXT,
+    sent_at         TIMESTAMPTZ,
+
+    -- 处理结果
+    status          VARCHAR(50) NOT NULL,  -- pending | processed | skipped | failed
+    message_id      UUID REFERENCES messages(id),
+    thread_id       UUID REFERENCES topic_threads(id),
+    error_message   TEXT,
+
+    processed_at    TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_import_status ON import_jobs(status, created_at DESC);
+CREATE INDEX idx_import_room ON import_jobs(room_id);
+CREATE INDEX idx_import_platform ON import_jobs(platform);
+CREATE INDEX idx_import_msg_job ON import_message_logs(job_id, status);
+CREATE INDEX idx_import_msg_status ON import_message_logs(status);
+
+COMMENT ON TABLE import_jobs IS '批量导入任务：跟踪导入进度和结果';
+COMMENT ON TABLE import_message_logs IS '导入消息记录：追踪每条消息的导入状态';
+
+-- =============================================================
 -- END OF DDL
 -- =============================================================

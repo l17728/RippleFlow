@@ -1780,6 +1780,267 @@ WHERE attributes->>'domain_id' = 'xxx';
 - 考虑是否需要完整的域权限体系
 - 评估引入 RBAC 或 ABAC 模型的必要性
 
+### 12.7 历史数据导入与信息链重建（边界场景）
+
+#### 12.7.1 场景描述
+
+当新群组被纳入信息域时，需要导入该群的历史消息数据，这会产生以下复杂情况：
+
+**场景A：补充历史上下文**
+```
+时间线：
+T1: 产品群讨论"支付功能设计"（已归档为线索A）
+T2: 技术群讨论"支付接口实现"（已归档为线索B）
+T3: 现在将技术群纳入产品域
+
+问题：
+- 线索A和线索B实际上是同一话题的不同视角
+- 需要建立跨群关联，形成完整信息链
+- 可能需要合并线索或建立父子关系
+```
+
+**场景B：信息冲突与修正**
+```
+已有知识：线索A状态为"讨论中"（基于产品群消息）
+新导入历史：技术群3天前已决定"使用方案X"
+
+问题：
+- 知识节点状态需要从"讨论中"更新为"已决策"
+- 需要追溯更新相关待办、决策记录
+- 可能影响依赖该知识的其他线索
+```
+
+**场景C：时间线插入**
+```
+域内现有消息：2024-01-15 至 2024-03-01
+新群历史消息：2023-12-01 至 2024-02-15
+
+问题：
+- 新消息时间戳早于部分现有知识节点
+- 需要在知识图谱中正确排序和关联
+- 可能影响热度计算、趋势分析
+```
+
+#### 12.7.2 技术挑战
+
+| 挑战 | 影响 | 复杂度 |
+|------|------|--------|
+| **线索合并检测** | 需要识别跨群相关话题 | ⭐⭐⭐⭐ |
+| **知识状态回溯** | 更新已有节点的状态和属性 | ⭐⭐⭐ |
+| **关联关系重建** | 重新计算实体间的关系边 | ⭐⭐⭐⭐ |
+| **时间线重排** | 影响时序分析和趋势计算 | ⭐⭐ |
+| **LLM重新分析** | 历史消息需要重新提取结构化信息 | ⭐⭐⭐⭐⭐ |
+| **数据一致性** | 确保更新后知识图谱逻辑自洽 | ⭐⭐⭐⭐ |
+
+#### 12.7.3 解决方案建议
+
+**方案1：增量式历史导入（推荐）**
+
+```sql
+-- 1. 创建历史导入任务表
+CREATE TABLE domain_import_tasks (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    domain_id       UUID NOT NULL REFERENCES domains(id),
+    room_id         UUID NOT NULL REFERENCES chat_rooms(id),
+    import_status   VARCHAR(50) DEFAULT 'pending',
+    message_count   INTEGER,
+    processed_count INTEGER DEFAULT 0,
+    started_at      TIMESTAMPTZ,
+    completed_at    TIMESTAMPTZ,
+    conflicts_found INTEGER DEFAULT 0,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 2. 冲突检测记录
+CREATE TABLE import_conflicts (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    task_id         UUID REFERENCES domain_import_tasks(id),
+    conflict_type   VARCHAR(50),  -- 'duplicate_thread', 'status_mismatch', 'entity_collision'
+    existing_node_id UUID REFERENCES knowledge_nodes(id),
+    new_evidence    JSONB,
+    resolution      VARCHAR(50),  -- 'merged', 'separated', 'updated', 'pending_review'
+    resolved_by     VARCHAR(255),
+    resolved_at     TIMESTAMPTZ
+);
+```
+
+**处理流程**：
+```
+1. 标记导入模式
+   └─ chat_rooms.import_mode = 'historical_backfill'
+   
+2. 批量处理历史消息（按时间倒序）
+   ├─ 每100条为一个批次
+   ├─ 运行标准6阶段流水线
+   └─ 标记 message.processing_status = 'historical'
+   
+3. 冲突检测
+   ├─ 相似主题检测（向量相似度 > 0.85）
+   ├─ 实体冲突检测（同实体不同属性）
+   ├─ 时间线冲突检测（因果倒置）
+   └─ 记录到 import_conflicts
+   
+4. 自动/人工解决
+   ├─ 高置信度冲突：自动合并
+   ├─ 中置信度冲突：提示管理员
+   └─ 低置信度冲突：作为独立线索保留
+   
+5. 知识图谱更新
+   ├─ 更新相关节点时间戳范围
+   ├─ 重新计算关系权重
+   ├─ 刷新聚合统计（热度、趋势）
+   └─ 触发依赖线索的级联更新
+   
+6. 完成标记
+   └─ chat_rooms.import_mode = NULL
+```
+
+**方案2：只读历史快照（轻量级）**
+
+如果完整重建过于复杂，可采用简化方案：
+
+```sql
+-- 历史数据仅做索引，不重建知识链
+ALTER TABLE messages ADD COLUMN is_historical BOOLEAN DEFAULT false;
+
+-- 历史消息可搜索，但不参与：
+-- - 状态追踪（不更新待办状态）
+-- - 决策追溯（仅作为参考）
+-- - 知识图谱更新（不创建新节点）
+-- 但保留：
+-- - 全文检索
+-- - 时间线浏览
+-- - 人员提及关系
+```
+
+**方案3：领域专属重建（分域策略）**
+
+不同域采用不同策略：
+
+| 域类型 | 历史导入策略 | 理由 |
+|--------|--------------|------|
+| **核心域**（产品/技术） | 完整重建 | 知识准确性要求高 |
+| **临时域**（项目组） | 只读快照 | 生命周期短，无需深度关联 |
+| **跨域公共群** | 不导入历史 | 信息已分散在各域 |
+
+#### 12.7.4 关键实现细节
+
+**1. 线索合并算法**
+
+```python
+# 基于语义相似度的线索合并检测
+def detect_merge_candidates(new_thread, domain_threads):
+    candidates = []
+    for existing in domain_threads:
+        # 计算标题相似度
+        title_sim = semantic_similarity(
+            new_thread.title, 
+            existing.title
+        )
+        
+        # 计算实体重叠度
+        common_entities = set(new_thread.entities) & set(existing.entities)
+        entity_overlap = len(common_entities) / max(len(new_thread.entities), len(existing.entities))
+        
+        # 时间邻近度（30天内）
+        time_proximity = 1 if abs(new_thread.date - existing.date) < 30 else 0.5
+        
+        # 综合评分
+        score = (title_sim * 0.5 + entity_overlap * 0.3 + time_proximity * 0.2)
+        
+        if score > 0.75:
+            candidates.append((existing, score))
+    
+    return sorted(candidates, key=lambda x: x[1], reverse=True)
+```
+
+**2. 知识状态更新策略**
+
+```
+原则：新证据优先级高于旧证据
+
+场景：已有状态 vs 新证据
+├─ "讨论中" + "已决策" → 更新为"已决策"
+├─ "待确认" + "已拒绝" → 更新为"已拒绝"  
+├─ "进行中" + "已完成" → 更新为"已完成"
+└─ "已归档" + "新讨论" → 拆分为新线索，建立关联
+
+特殊情况：
+- 若新证据时间戳早于已有证据，需提示人工审核
+- 若状态变更涉及敏感内容，重新触发授权流程
+```
+
+**3. 级联更新范围**
+
+```sql
+-- 当节点状态变更时，需要级联更新的对象
+WITH RECURSIVE impact_chain AS (
+    -- 直接关联的线索
+    SELECT 
+        source_id as node_id,
+        target_id as related_id,
+        edge_type,
+        1 as depth
+    FROM knowledge_edges
+    WHERE source_id = '变更节点ID'
+    
+    UNION ALL
+    
+    -- 间接关联（最多3层）
+    SELECT 
+        ic.node_id,
+        ke.target_id,
+        ke.edge_type,
+        ic.depth + 1
+    FROM impact_chain ic
+    JOIN knowledge_edges ke ON ic.related_id = ke.source_id
+    WHERE ic.depth < 3
+)
+-- 需要更新的对象：
+-- 1. 依赖该节点的待办任务
+-- 2. 引用该节点的决策记录
+-- 3. 关联的话题线索状态
+-- 4. 知识图谱聚合统计
+```
+
+#### 12.7.5 复杂度评估
+
+| 子功能 | 技术复杂度 | 业务影响 | 建议策略 |
+|--------|------------|----------|----------|
+| **历史消息批量处理** | ⭐⭐⭐ | 中 | 异步队列处理 |
+| **相似线索检测** | ⭐⭐⭐⭐ | 高 | 结合规则+语义相似度 |
+| **冲突自动解决** | ⭐⭐⭐⭐⭐ | 高 | 高置信度自动，低置信度人工 |
+| **知识状态回溯** | ⭐⭐⭐ | 高 | 严格时序验证 |
+| **级联更新** | ⭐⭐⭐⭐ | 中 | 限制影响范围（3层以内） |
+| **导入任务管理** | ⭐⭐ | 低 | 标准任务队列 |
+
+#### 12.7.6 实施建议
+
+**Phase 1：基础导入（MVP）**
+- 实现历史消息批量导入
+- 仅创建新线索，不做合并检测
+- 历史消息标记为 `is_historical = true`
+- 可搜索但不影响现有知识状态
+- 工作量：3-5天
+
+**Phase 2：智能合并**
+- 实现相似线索检测算法
+- 提示管理员确认合并建议
+- 支持手动关联已有线索
+- 工作量：1周
+
+**Phase 3：全自动重建**
+- 高置信度冲突自动解决
+- 知识状态自动回溯更新
+- 完整的级联更新机制
+- 工作量：2周
+
+**风险控制**：
+- 导入前创建知识图谱快照（备份）
+- 支持按群撤销导入操作
+- 导入过程中暂停该域的写操作
+- 导入完成后发送变更摘要给域管理员
+
 ---
 
 **评审完成时间**: 2026-03-02  

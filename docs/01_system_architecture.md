@@ -2928,4 +2928,825 @@ CREATE INDEX idx_support_status ON support_relations(status);
 
 ---
 
+## 25. 多平台适配器架构（新增）
+
+### 25.1 概述
+
+RippleFlow 支持多种聊天平台的消息接入，采用**平台适配器**模式实现统一的消息处理。
+
+**支持平台**：
+- 微信（个人微信 Web/Protocol，如 Wechaty）
+- 飞书
+- 钉书
+- 自定义平台（可扩展）
+
+### 25.2 架构设计
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      消息接入层                                  │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                   消息适配器抽象                          │   │
+│  │               MessageAdapter Protocol                    │   │
+│  │   - normalize_message() → 统一消息格式                   │   │
+│  │   - parse_user() → 统一用户标识                          │   │
+│  │   - parse_room() → 统一群组标识                          │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                              ↑                                  │
+│        ┌─────────────────────┼─────────────────────┐           │
+│        │                     │                     │           │
+│  ┌─────┴─────┐         ┌─────┴─────┐         ┌─────┴─────┐    │
+│  │ 微信适配器 │         │ 飞书适配器 │         │ 钉书适配器 │    │
+│  │ Wechaty   │         │ Feishu   │         │ DingTalk  │    │
+│  │ Adapter   │         │ Adapter  │         │ Adapter   │    │
+│  └───────────┘         └───────────┘         └───────────┘    │
+│        │                     │                     │           │
+│  ┌─────┴─────┐         ┌─────┴─────┐         ┌─────┴─────┐    │
+│  │ 批量导入  │         │ 批量导入  │         │ 批量导入  │    │
+│  │ Importer  │         │ Importer  │         │ Importer  │    │
+│  └───────────┘         └───────────┘         └───────────┘    │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                   自定义平台适配器                        │   │
+│  │                  CustomAdapter                           │   │
+│  │  支持任意平台，通过配置定义消息格式                       │   │
+│  └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 25.3 统一消息格式
+
+```python
+# 平台无关的统一消息格式
+class UnifiedMessage:
+    # 平台标识
+    platform: str              # wechat | feishu | dingtalk | custom
+    platform_message_id: str   # 平台原始消息ID
+    platform_room_id: str      # 平台原始群ID
+
+    # 统一字段
+    sender_id: str             # 发送者ID（平台用户ID）
+    sender_name: str           # 发送者昵称
+    room_id: str               # 群组ID（系统内统一）
+    room_name: str             # 群组名称
+
+    # 消息内容
+    content: str               # 消息内容（文本）
+    content_type: str          # text | image | file | link | video | audio
+
+    # 时间信息
+    sent_at: datetime          # 发送时间（UTC）
+    received_at: datetime      # 接收时间（UTC）
+
+    # 关联信息
+    reply_to: Optional[str]    # 回复的消息ID
+    mentions: List[str]        # @的人列表
+
+    # 平台特有数据
+    extra: dict                # 平台特有元数据
+```
+
+### 25.4 平台适配器接口
+
+```python
+# 平台适配器 Protocol
+class MessageAdapter(Protocol):
+    """消息适配器接口"""
+
+    def normalize_message(self, raw_message: dict) -> UnifiedMessage:
+        """将平台原始消息转换为统一格式"""
+        ...
+
+    def parse_user(self, platform_user_id: str) -> UserIdentity:
+        """解析用户身份"""
+        ...
+
+    def parse_room(self, platform_room_id: str) -> RoomIdentity:
+        """解析群组身份"""
+        ...
+
+    def validate_signature(self, request: Request) -> bool:
+        """验证平台签名（安全校验）"""
+        ...
+
+
+class BatchImporter(Protocol):
+    """批量导入器接口"""
+
+    def parse_file(self, file_path: str, format: str) -> List[UnifiedMessage]:
+        """解析导入文件"""
+        ...
+
+    def get_supported_formats(self) -> List[str]:
+        """获取支持的文件格式"""
+        ...
+```
+
+### 25.5 微信适配器
+
+```python
+# 微信适配器（基于 Wechaty）
+class WechatAdapter(MessageAdapter):
+    """微信消息适配器"""
+
+    platform = "wechat"
+
+    def normalize_message(self, raw_message: dict) -> UnifiedMessage:
+        """
+        Wechaty 消息格式：
+        {
+            "id": "msg_xxx",
+            "type": "text",
+            "text": "消息内容",
+            "from": "contact_id",
+            "room": "room_id",
+            "timestamp": 1709289000,
+            "mentionIds": ["contact_id_1", "contact_id_2"]
+        }
+        """
+        return UnifiedMessage(
+            platform="wechat",
+            platform_message_id=raw_message["id"],
+            platform_room_id=raw_message.get("room", ""),
+            sender_id=raw_message["from"],
+            sender_name=self._get_contact_name(raw_message["from"]),
+            room_id=self._normalize_room_id(raw_message.get("room", "")),
+            room_name=self._get_room_name(raw_message.get("room", "")),
+            content=raw_message.get("text", ""),
+            content_type=self._map_content_type(raw_message["type"]),
+            sent_at=datetime.fromtimestamp(raw_message["timestamp"], tz=timezone.utc),
+            received_at=datetime.now(tz=timezone.utc),
+            reply_to=None,
+            mentions=raw_message.get("mentionIds", []),
+            extra=raw_message
+        )
+
+    def _map_content_type(self, wechat_type: str) -> str:
+        type_map = {
+            "text": "text",
+            "image": "image",
+            "video": "video",
+            "audio": "audio",
+            "file": "file",
+            "link": "link"
+        }
+        return type_map.get(wechat_type, "unknown")
+
+
+class WechatBatchImporter(BatchImporter):
+    """微信批量导入器"""
+
+    def get_supported_formats(self) -> List[str]:
+        return ["wechat_txt", "json", "csv"]
+
+    def parse_file(self, file_path: str, format: str) -> List[UnifiedMessage]:
+        if format == "wechat_txt":
+            return self._parse_wechat_txt(file_path)
+        elif format == "json":
+            return self._parse_json(file_path)
+        elif format == "csv":
+            return self._parse_csv(file_path)
+
+    def _parse_wechat_txt(self, file_path: str) -> List[UnifiedMessage]:
+        """
+        解析微信导出的文本格式：
+
+        张三 2026/3/1 10:30:00
+        这是一条消息内容
+
+        李四 2026/3/1 10:31:05
+        回复张三：这是回复内容
+
+        [图片]
+        [文件] 文件名.pdf
+        """
+        messages = []
+        current_sender = None
+        current_time = None
+        current_content = []
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                # 尝试匹配消息头：发送者 时间
+                header_match = re.match(r'^(.+?)\s+(\d{4}/\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}:\d{2})$', line.strip())
+
+                if header_match:
+                    # 保存上一条消息
+                    if current_sender and current_content:
+                        messages.append(self._create_message(
+                            current_sender, current_time, '\n'.join(current_content)
+                        ))
+
+                    # 开始新消息
+                    current_sender = header_match.group(1).strip()
+                    current_time = datetime.strptime(header_match.group(2), '%Y/%m/%d %H:%M:%S')
+                    current_content = []
+                else:
+                    # 消息内容
+                    if line.strip():
+                        current_content.append(line.strip())
+
+        # 保存最后一条消息
+        if current_sender and current_content:
+            messages.append(self._create_message(
+                current_sender, current_time, '\n'.join(current_content)
+            ))
+
+        return messages
+```
+
+### 25.6 飞书适配器
+
+```python
+# 飞书适配器
+class FeishuAdapter(MessageAdapter):
+    """飞书消息适配器"""
+
+    platform = "feishu"
+
+    def normalize_message(self, raw_message: dict) -> UnifiedMessage:
+        """
+        飞书消息格式：
+        {
+            "msg_type": "text",
+            "content": "{\"text\": \"消息内容\"}",
+            "create_time": "2026-03-01T10:30:00Z",
+            "sender": {
+                "sender_id": {"open_id": "ou_xxx"},
+                "sender_type": "user"
+            },
+            "message_id": "om_xxx",
+            "chat_id": "oc_xxx"
+        }
+        """
+        content_data = json.loads(raw_message.get("content", "{}"))
+
+        return UnifiedMessage(
+            platform="feishu",
+            platform_message_id=raw_message["message_id"],
+            platform_room_id=raw_message["chat_id"],
+            sender_id=raw_message["sender"]["sender_id"]["open_id"],
+            sender_name=self._get_user_name(raw_message["sender"]["sender_id"]["open_id"]),
+            room_id=self._normalize_room_id(raw_message["chat_id"]),
+            room_name=self._get_chat_name(raw_message["chat_id"]),
+            content=content_data.get("text", ""),
+            content_type=self._map_content_type(raw_message["msg_type"]),
+            sent_at=datetime.fromisoformat(raw_message["create_time"].replace("Z", "+00:00")),
+            received_at=datetime.now(tz=timezone.utc),
+            reply_to=None,
+            mentions=self._extract_mentions(content_data),
+            extra=raw_message
+        )
+
+
+class FeishuBatchImporter(BatchImporter):
+    """飞书批量导入器"""
+
+    def get_supported_formats(self) -> List[str]:
+        return ["feishu_json", "json", "csv"]
+
+    def parse_file(self, file_path: str, format: str) -> List[UnifiedMessage]:
+        if format == "feishu_json":
+            return self._parse_feishu_export(file_path)
+        # ...
+```
+
+### 25.7 钉书适配器
+
+```python
+# 钉书适配器
+class DingtalkAdapter(MessageAdapter):
+    """钉书消息适配器"""
+
+    platform = "dingtalk"
+
+    def normalize_message(self, raw_message: dict) -> UnifiedMessage:
+        """
+        钉书消息格式：
+        {
+            "msgId": "xxx",
+            "content": "消息内容",
+            "gmtCreate": 1709289000000,
+            "senderNick": "张三",
+            "senderStaffId": "user123",
+            "conversationId": "cidxxx",
+            "conversationType": 2,
+            "msgType": "text"
+        }
+        """
+        return UnifiedMessage(
+            platform="dingtalk",
+            platform_message_id=raw_message["msgId"],
+            platform_room_id=raw_message["conversationId"],
+            sender_id=raw_message["senderStaffId"],
+            sender_name=raw_message["senderNick"],
+            room_id=self._normalize_room_id(raw_message["conversationId"]),
+            room_name=self._get_conversation_name(raw_message["conversationId"]),
+            content=raw_message["content"],
+            content_type=self._map_content_type(raw_message["msgType"]),
+            sent_at=datetime.fromtimestamp(raw_message["gmtCreate"] / 1000, tz=timezone.utc),
+            received_at=datetime.now(tz=timezone.utc),
+            reply_to=None,
+            mentions=self._extract_mentions(raw_message),
+            extra=raw_message
+        )
+```
+
+### 25.8 平台适配器注册表
+
+```python
+# 平台适配器注册表
+class PlatformAdapterRegistry:
+    """平台适配器注册表"""
+
+    _adapters: Dict[str, MessageAdapter] = {}
+    _importers: Dict[str, BatchImporter] = {}
+
+    @classmethod
+    def register(cls, platform: str, adapter: MessageAdapter, importer: BatchImporter = None):
+        """注册平台适配器"""
+        cls._adapters[platform] = adapter
+        if importer:
+            cls._importers[platform] = importer
+
+    @classmethod
+    def get_adapter(cls, platform: str) -> MessageAdapter:
+        """获取平台适配器"""
+        if platform not in cls._adapters:
+            raise ValueError(f"Unsupported platform: {platform}")
+        return cls._adapters[platform]
+
+    @classmethod
+    def get_importer(cls, platform: str) -> Optional[BatchImporter]:
+        """获取批量导入器"""
+        return cls._importers.get(platform)
+
+    @classmethod
+    def list_platforms(cls) -> List[str]:
+        """列出所有支持的平台"""
+        return list(cls._adapters.keys())
+
+
+# 初始化注册
+def init_platform_adapters():
+    # 微信
+    PlatformAdapterRegistry.register(
+        "wechat",
+        WechatAdapter(),
+        WechatBatchImporter()
+    )
+
+    # 飞书
+    PlatformAdapterRegistry.register(
+        "feishu",
+        FeishuAdapter(),
+        FeishuBatchImporter()
+    )
+
+    # 钉书
+    PlatformAdapterRegistry.register(
+        "dingtalk",
+        DingtalkAdapter(),
+        DingtalkBatchImporter()
+    )
+
+    # 自定义平台
+    PlatformAdapterRegistry.register(
+        "custom",
+        CustomAdapter(),
+        CustomBatchImporter()
+    )
+```
+
+---
+
+## 26. 批量导入与时序重放（新增）
+
+### 26.1 概述
+
+批量导入功能允许用户导入聊天软件导出的历史消息，系统通过**时序重放**模式模拟消息流，逐条进入处理流水线。
+
+**应用场景**：
+- 聊天软件不支持实时消息同步
+- 迁移历史数据到新系统
+- 补充缺失的时间段数据
+
+### 26.2 导入流程架构
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      批量导入流程                                │
+│                                                                 │
+│  1. 上传文件                                                    │
+│     POST /import/{platform}/batch                              │
+│     Body: {room_id, file, time_range, options}                 │
+│                                                                 │
+│  2. 创建导入任务                                                │
+│     ┌─────────────────────────────────────────────────────┐    │
+│     │  import_jobs 表                                     │    │
+│     │  - id, platform, room_id                            │    │
+│     │  - total_count, processed_count, failed_count       │    │
+│     │  - status: pending | processing | completed | failed │    │
+│     │  - options: {time_scale, skip_noise, ...}           │    │
+│     └─────────────────────────────────────────────────────┘    │
+│                                                                 │
+│  3. 解析文件                                                    │
+│     ┌─────────────────────────────────────────────────────┐    │
+│     │  平台解析器（BatchImporter）                         │    │
+│     │  ↓                                                   │    │
+│     │  解析 → 验证 → 标准化 → 排序                         │    │
+│     └─────────────────────────────────────────────────────┘    │
+│                                                                 │
+│  4. 时序重放处理                                                │
+│     ┌─────────────────────────────────────────────────────┐    │
+│     │                                                     │    │
+│     │  按原始时间排序消息                                  │    │
+│     │  ↓                                                   │    │
+│     │  模拟时间间隔（可选加速）                            │    │
+│     │  ↓                                                   │    │
+│     │  逐条进入消息处理流水线（Stage 0-5）                 │    │
+│     │  ↓                                                   │    │
+│     │  更新导入进度                                        │    │
+│     │                                                     │    │
+│     └─────────────────────────────────────────────────────┘    │
+│                                                                 │
+│  5. 完成通知                                                    │
+│     生成导入报告 → 通知管理员                                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 26.3 导入任务表
+
+```sql
+-- 导入任务表
+CREATE TABLE import_jobs (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    platform        VARCHAR(50) NOT NULL,   -- wechat | feishu | dingtalk | custom
+    room_id         VARCHAR(255) NOT NULL,  -- 目标群组ID
+
+    -- 文件信息
+    file_name       VARCHAR(500),
+    file_path       VARCHAR(1000),
+    file_size       BIGINT,
+    file_format     VARCHAR(50),            -- wechat_txt | json | csv | ...
+
+    -- 进度信息
+    total_count     INTEGER DEFAULT 0,
+    processed_count INTEGER DEFAULT 0,
+    failed_count    INTEGER DEFAULT 0,
+    skipped_count   INTEGER DEFAULT 0,
+
+    -- 状态
+    status          VARCHAR(50) DEFAULT 'pending',  -- pending | parsing | processing | completed | failed | cancelled
+
+    -- 时间范围
+    time_range_start TIMESTAMPTZ,
+    time_range_end   TIMESTAMPTZ,
+
+    -- 导入选项
+    options         JSONB DEFAULT '{}',
+    -- {
+    --   "time_scale": 1.0,        -- 时间加速因子（1.0=实时，10.0=10倍速）
+    --   "skip_noise": true,       -- 跳过噪声消息
+    --   "batch_size": 100,        -- 批处理大小
+    --   "reprocess": false        -- 是否重新处理已存在的消息
+    -- }
+
+    -- 结果统计
+    result_summary  JSONB DEFAULT '{}',
+    -- {
+    --   "threads_created": 15,
+    --   "threads_updated": 8,
+    --   "action_items_created": 5,
+    --   "decisions_created": 3,
+    --   "errors": [...]
+    -- }
+
+    -- 时间信息
+    started_at      TIMESTAMPTZ,
+    completed_at    TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    created_by      VARCHAR(255) NOT NULL
+);
+
+CREATE INDEX idx_import_status ON import_jobs(status, created_at DESC);
+CREATE INDEX idx_import_room ON import_jobs(room_id);
+CREATE INDEX idx_import_platform ON import_jobs(platform);
+
+-- 导入消息记录表（追踪每条消息的导入状态）
+CREATE TABLE import_message_logs (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    job_id          UUID NOT NULL REFERENCES import_jobs(id) ON DELETE CASCADE,
+
+    -- 消息信息
+    platform_message_id VARCHAR(500),
+    sender_id       VARCHAR(255),
+    sender_name     VARCHAR(255),
+    content_preview TEXT,
+    sent_at         TIMESTAMPTZ,
+
+    -- 处理结果
+    status          VARCHAR(50) NOT NULL,  -- pending | processed | skipped | failed
+    message_id      UUID REFERENCES messages(id),
+    thread_id       UUID REFERENCES topic_threads(id),
+    error_message   TEXT,
+
+    processed_at    TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_import_msg_job ON import_message_logs(job_id, status);
+CREATE INDEX idx_import_msg_status ON import_message_logs(status);
+```
+
+### 26.4 时序重放引擎
+
+```python
+# 时序重放引擎
+class TimedReplayEngine:
+    """时序重放引擎"""
+
+    def __init__(self, job_id: str, options: dict):
+        self.job_id = job_id
+        self.time_scale = options.get("time_scale", 1.0)  # 默认实时
+        self.batch_size = options.get("batch_size", 100)
+        self.skip_noise = options.get("skip_noise", True)
+
+    async def replay(self, messages: List[UnifiedMessage]):
+        """执行时序重放"""
+
+        # 按时间排序
+        sorted_messages = sorted(messages, key=lambda m: m.sent_at)
+
+        # 分批处理
+        for batch in self._batch_messages(sorted_messages):
+            for msg in batch:
+                # 模拟时间间隔（可选加速）
+                await self._apply_time_delay(msg, batch[0])
+
+                # 处理消息
+                await self._process_message(msg)
+
+                # 更新进度
+                await self._update_progress()
+
+        # 生成报告
+        await self._generate_report()
+
+    async def _apply_time_delay(self, msg: UnifiedMessage, prev_msg: UnifiedMessage):
+        """应用时间延迟"""
+        if prev_msg and self.time_scale > 0:
+            time_diff = (msg.sent_at - prev_msg.sent_at).total_seconds()
+            # 应用时间加速
+            actual_delay = time_diff / self.time_scale
+            if actual_delay > 0:
+                await asyncio.sleep(min(actual_delay, 1.0))  # 最大延迟1秒
+
+    async def _process_message(self, msg: UnifiedMessage):
+        """处理单条消息"""
+        try:
+            # 进入消息处理流水线
+            result = await message_pipeline.process(msg)
+
+            # 记录结果
+            await self._log_message_result(msg, result)
+
+        except Exception as e:
+            await self._log_message_error(msg, str(e))
+
+    def _batch_messages(self, messages: List[UnifiedMessage]) -> Iterator[List[UnifiedMessage]]:
+        """分批处理消息"""
+        for i in range(0, len(messages), self.batch_size):
+            yield messages[i:i + self.batch_size]
+```
+
+### 26.5 导入 API
+
+```yaml
+# 批量导入接口
+POST /api/v1/import/{platform}/batch:
+  summary: 批量导入消息
+  parameters:
+    - name: platform
+      in: path
+      required: true
+      enum: [wechat, feishu, dingtalk, custom]
+  requestBody:
+    content:
+      multipart/form-data:
+        schema:
+          properties:
+            file:
+              type: string
+              format: binary
+              description: 导入文件
+            room_id:
+              type: string
+              description: 目标群组ID
+            options:
+              type: object
+              properties:
+                time_scale:
+                  type: number
+                  default: 0
+                  description: 时间加速因子（0=不延迟，最大速度）
+                skip_noise:
+                  type: boolean
+                  default: true
+                reprocess:
+                  type: boolean
+                  default: false
+  responses:
+    200:
+      content:
+        application/json:
+          schema:
+            properties:
+              job_id:
+                type: string
+              status:
+                type: string
+              estimated_time:
+                type: string
+
+GET /api/v1/import/{platform}/status/{job_id}:
+  summary: 查询导入任务状态
+  responses:
+    200:
+      content:
+        application/json:
+          schema:
+            properties:
+              job_id:
+                type: string
+              status:
+                type: string
+              progress:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                  processed:
+                    type: integer
+                  failed:
+                    type: integer
+                  percentage:
+                    type: number
+              result_summary:
+                type: object
+
+GET /api/v1/import/{platform}/formats:
+  summary: 获取支持的导入格式
+  responses:
+    200:
+      content:
+        application/json:
+          schema:
+            properties:
+              formats:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    name:
+                      type: string
+                    description:
+                      type: string
+                    example:
+                      type: string
+
+DELETE /api/v1/import/{platform}/jobs/{job_id}:
+  summary: 取消导入任务
+  responses:
+    200:
+      content:
+        application/json:
+          schema:
+            properties:
+              status:
+                type: string
+              message:
+                type: string
+
+GET /api/v1/import/jobs:
+  summary: 列出导入任务
+  parameters:
+    - name: status
+      in: query
+      enum: [pending, processing, completed, failed, all]
+    - name: platform
+      in: query
+    - name: limit
+      in: query
+      default: 20
+  responses:
+    200:
+      content:
+        application/json:
+          schema:
+            properties:
+              jobs:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ImportJob'
+```
+
+### 26.6 Webhook 扩展接口
+
+```yaml
+# 多平台 Webhook 接口
+POST /webhook/{platform}/message:
+  summary: 接收平台消息
+  parameters:
+    - name: platform
+      in: path
+      required: true
+      enum: [wechat, feishu, dingtalk, custom]
+  requestBody:
+    content:
+      application/json:
+        schema:
+          description: 平台原始消息格式
+  responses:
+    200:
+      content:
+        application/json:
+          schema:
+            properties:
+              status:
+                type: string
+              message_id:
+                type: string
+
+POST /webhook/{platform}/event:
+  summary: 接收平台事件
+  parameters:
+    - name: platform
+      in: path
+      required: true
+  requestBody:
+    content:
+      application/json:
+        schema:
+          description: 平台事件格式
+  responses:
+    200:
+      content:
+        application/json:
+          schema:
+            properties:
+              status:
+                type: string
+```
+
+### 26.7 平台数据表扩展
+
+```sql
+-- 平台群组映射表
+CREATE TABLE platform_rooms (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    platform        VARCHAR(50) NOT NULL,
+    platform_room_id VARCHAR(255) NOT NULL,
+    room_id         UUID REFERENCES chat_rooms(id),
+
+    room_name       VARCHAR(500),
+    room_type       VARCHAR(50),            -- group | private
+
+    -- 同步状态
+    sync_enabled    BOOLEAN DEFAULT true,
+    last_sync_at    TIMESTAMPTZ,
+    last_message_id VARCHAR(500),
+
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW(),
+
+    UNIQUE(platform, platform_room_id)
+);
+
+CREATE INDEX idx_platform_rooms ON platform_rooms(platform, platform_room_id);
+
+-- 平台用户映射表
+CREATE TABLE platform_users (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    platform        VARCHAR(50) NOT NULL,
+    platform_user_id VARCHAR(255) NOT NULL,
+    user_id         UUID REFERENCES chat_users(id),
+
+    display_name    VARCHAR(500),
+    avatar_url      VARCHAR(1000),
+
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW(),
+
+    UNIQUE(platform, platform_user_id)
+);
+
+CREATE INDEX idx_platform_users ON platform_users(platform, platform_user_id);
+```
+
+---
+
 **END OF DOCUMENT**
