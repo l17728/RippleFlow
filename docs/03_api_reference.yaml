@@ -1032,6 +1032,96 @@ components:
         knowledge_contributions: { type: integer }
         tasks_completed: { type: integer }
 
+    # ── 文件系统 ─────────────────────────────────────────────────────────
+    FileInfo:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        thread_id: { type: string, format: uuid }
+        file_path: { type: string }
+        file_name: { type: string }
+        layer:
+          type: string
+          enum: [L1, L2, L3]
+        file_type:
+          type: string
+          enum: [thread, summary, original, graph, index]
+        status:
+          type: string
+          enum: [active, archived, compacted]
+        file_size: { type: integer }
+        compressed_size: { type: integer }
+        created_at: { type: string, format: date-time }
+        last_access_at: { type: string, format: date-time }
+        compacted_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    CompactJob:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        compact_type:
+          type: string
+          enum: [L1_to_L2, L2_to_L3]
+        thread_ids:
+          type: array
+          items: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [pending, processing, completed, failed]
+        total_count: { type: integer }
+        processed_count: { type: integer }
+        failed_count: { type: integer }
+        result:
+          type: object
+          properties:
+            summaries_generated: { type: integer }
+            files_compressed: { type: integer }
+            errors:
+              type: array
+              items: { type: string }
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at: { type: string, format: date-time }
+
+    FileSystemStats:
+      type: object
+      properties:
+        total_files: { type: integer }
+        total_size: { type: integer }
+        by_layer:
+          type: object
+          properties:
+            L1:
+              type: object
+              properties:
+                file_count: { type: integer }
+                total_size: { type: integer }
+            L2:
+              type: object
+              properties:
+                file_count: { type: integer }
+                total_size: { type: integer }
+                compressed_size: { type: integer }
+            L3:
+              type: object
+              properties:
+                file_count: { type: integer }
+                total_size: { type: integer }
+        pending_compact:
+          type: object
+          properties:
+            L1_candidates: { type: integer }
+            L2_candidates: { type: integer }
+
     # ── 系统统计（已有）──────────────────────────────────────────────
     SystemStats:
       type: object
@@ -3517,3 +3607,261 @@ paths:
 
 security:
   - cookieAuth: []
+
+  # ════════════════════════════════════════════════════
+  # FILE SYSTEM (文件系统分级索引与存储)
+  # ════════════════════════════════════════════════════
+
+  /api/v1/files/context:
+    get:
+      tags: [files]
+      summary: 获取上下文文件列表
+      description: |
+        根据查询返回相关的文件列表，遵循分级访问策略：
+        - L1 活跃层：默认加载
+        - L2 归档层：仅摘要，不加载原文
+        - L3 核心层：索引始终加载
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: query
+          schema: { type: string }
+          description: 查询内容
+        - in: query
+          name: time_range
+          schema:
+            type: string
+            enum: [recent, all, archived]
+          default: recent
+          description: 时间范围
+        - in: query
+          name: layer
+          schema:
+            type: string
+            enum: [L1, L2, L3, all]
+          default: all
+          description: 指定层级
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  L1_active:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        file_path: { type: string }
+                        title: { type: string }
+                        last_message_at: { type: string, format: date-time }
+                  L2_summaries:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        file_path: { type: string }
+                        title: { type: string }
+                        summary_preview: { type: string }
+                  L3_core:
+                    type: array
+                    items: { type: string }
+
+  /api/v1/files:
+    get:
+      tags: [files]
+      summary: 列出文件
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: layer
+          schema:
+            type: string
+            enum: [L1, L2, L3]
+        - in: query
+          name: type
+          schema:
+            type: string
+            enum: [thread, summary, original, graph, index]
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [active, archived, compacted]
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  files:
+                    type: array
+                    items: { $ref: '#/components/schemas/FileInfo' }
+                  total: { type: integer }
+
+  /api/v1/files/{file_path}:
+    get:
+      tags: [files]
+      summary: 获取文件内容
+      description: |
+        获取指定文件的内容。默认优先返回摘要。
+
+        **访问策略**：
+        - L1 文件：直接返回完整内容
+        - L2 摘要：返回摘要内容
+        - L2 原文：需要 `prefer=original`，解压后返回
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: file_path
+          required: true
+          schema: { type: string }
+          description: 文件路径
+        - in: query
+          name: prefer
+          schema:
+            type: string
+            enum: [summary, original]
+          default: summary
+          description: 优先返回摘要还是原文
+      responses:
+        '200':
+          content:
+            text/plain:
+              schema:
+                type: string
+        '404':
+          description: 文件不存在
+
+  /api/v1/files/original/{thread_id}:
+    get:
+      tags: [files]
+      summary: 获取话题原始文件
+      description: 获取话题的完整原始文件（解压后）
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: thread_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          description: 文件不存在
+
+  /api/v1/files/compact:
+    post:
+      tags: [files]
+      summary: 手动触发压缩
+      description: |
+        管理员可手动触发话题压缩（Compact）。
+
+        **压缩流程**：
+        1. 生成话题摘要
+        2. 压缩原始文件
+        3. 移动到归档层
+        4. 更新索引
+      security:
+        - cookieAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                thread_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                compact_type:
+                  type: string
+                  enum: [L1_to_L2, L2_to_L3]
+                  default: L1_to_L2
+                force:
+                  type: boolean
+                  default: false
+                  description: 是否强制压缩（忽略时间条件）
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id: { type: string, format: uuid }
+                  status: { type: string }
+                  estimated_time: { type: string }
+        '403':
+          description: 非管理员
+
+  /api/v1/files/compact/jobs/{job_id}:
+    get:
+      tags: [files]
+      summary: 查询压缩任务状态
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompactJob'
+
+  /api/v1/files/stats:
+    get:
+      tags: [files]
+      summary: 获取文件系统统计
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total_files: { type: integer }
+                  total_size: { type: integer }
+                  by_layer:
+                    type: object
+                    properties:
+                      L1:
+                        type: object
+                        properties:
+                          file_count: { type: integer }
+                          total_size: { type: integer }
+                          oldest_file: { type: string, format: date-time }
+                      L2:
+                        type: object
+                        properties:
+                          file_count: { type: integer }
+                          total_size: { type: integer }
+                          compressed_size: { type: integer }
+                          compression_ratio: { type: number }
+                      L3:
+                        type: object
+                        properties:
+                          file_count: { type: integer }
+                          total_size: { type: integer }
+                  pending_compact:
+                    type: object
+                    properties:
+                      L1_candidates: { type: integer }
+                      L2_candidates: { type: integer }

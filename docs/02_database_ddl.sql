@@ -1835,5 +1835,148 @@ GROUP BY user_id_a, user_id_b, relation_type;
 COMMENT ON VIEW user_collaboration_stats IS '用户协作统计：汇总用户间的协作关系';
 
 -- =============================================================
+-- SECTION 18: 文件系统分级索引与存储
+-- =============================================================
+
+-- 文件索引表
+CREATE TABLE file_index (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    thread_id       UUID REFERENCES topic_threads(id) ON DELETE CASCADE,
+
+    -- 文件路径
+    file_path       VARCHAR(1000) NOT NULL UNIQUE,
+    file_name       VARCHAR(500) NOT NULL,
+
+    -- 层级
+    layer           VARCHAR(20) NOT NULL,  -- L1 | L2 | L3
+
+    -- 文件类型
+    file_type       VARCHAR(50) NOT NULL,  -- thread | summary | original | graph | index
+
+    -- 文件状态
+    status          VARCHAR(50) DEFAULT 'active',  -- active | archived | compacted
+
+    -- 存储信息
+    file_size       BIGINT,                 -- 原始文件大小
+    compressed_size BIGINT,                 -- 压缩后大小
+    checksum        VARCHAR(128),           -- 文件校验和
+
+    -- 时间信息
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    last_access_at  TIMESTAMPTZ DEFAULT NOW(),
+    compacted_at    TIMESTAMPTZ,
+
+    -- 元数据
+    metadata        JSONB DEFAULT '{}'
+);
+
+CREATE INDEX idx_file_thread ON file_index(thread_id);
+CREATE INDEX idx_file_layer ON file_index(layer);
+CREATE INDEX idx_file_type ON file_index(file_type);
+CREATE INDEX idx_file_status ON file_index(status);
+
+COMMENT ON TABLE file_index IS '文件索引：追踪知识库文件的位置和状态';
+
+-- Compact 任务表
+CREATE TABLE compact_jobs (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+
+    -- 任务类型
+    compact_type    VARCHAR(50) NOT NULL,  -- L1_to_L2 | L2_to_L3
+
+    -- 关联话题
+    thread_ids      UUID[] NOT NULL,
+
+    -- 任务状态
+    status          VARCHAR(50) DEFAULT 'pending',  -- pending | processing | completed | failed
+
+    -- 处理结果
+    total_count     INTEGER DEFAULT 0,
+    processed_count INTEGER DEFAULT 0,
+    failed_count    INTEGER DEFAULT 0,
+
+    -- 结果详情
+    result          JSONB DEFAULT '{}',
+
+    -- 时间信息
+    started_at      TIMESTAMPTZ,
+    completed_at    TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    created_by      VARCHAR(255)
+);
+
+CREATE INDEX idx_compact_status ON compact_jobs(status, created_at DESC);
+CREATE INDEX idx_compact_type ON compact_jobs(compact_type);
+
+COMMENT ON TABLE compact_jobs IS '压缩任务：追踪信息降级和摘要生成任务';
+
+-- Compact 配置表
+CREATE TABLE compact_config (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+
+    -- 配置名称
+    name            VARCHAR(100) NOT NULL UNIQUE,
+
+    -- 触发条件
+    trigger_condition JSONB NOT NULL,
+    -- {
+    --   "field": "last_message_at",
+    --   "operator": ">",
+    --   "value": "30 days"
+    -- }
+
+    -- 执行动作
+    actions         JSONB NOT NULL,
+    -- [
+    --   {"name": "generate_summary", "enabled": true},
+    --   {"name": "compress_original", "enabled": true}
+    -- ]
+
+    -- 调度
+    schedule        VARCHAR(100),  -- cron 表达式
+
+    -- 状态
+    is_active       BOOLEAN DEFAULT true,
+
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+INSERT INTO compact_config (name, trigger_condition, actions, schedule) VALUES
+('L1_to_L2',
+ '{"field": "last_message_at", "operator": ">", "value": "30 days"}',
+ '[{"name": "generate_summary"}, {"name": "compress_original"}, {"name": "update_index"}]',
+ '0 2 * * *'),
+
+('L2_to_L3',
+ '{"field": "last_access_at", "operator": ">", "value": "180 days"}',
+ '[{"name": "extract_entities"}, {"name": "update_decision_log"}]',
+ '0 3 * * 0');
+
+COMMENT ON TABLE compact_config IS '压缩配置：定义信息降级规则';
+
+-- 文件访问日志表
+CREATE TABLE file_access_logs (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    file_id         UUID REFERENCES file_index(id) ON DELETE SET NULL,
+
+    -- 访问者
+    accessed_by     VARCHAR(255),           -- ldap_user_id 或 'system'
+
+    -- 访问方式
+    access_type     VARCHAR(50) NOT NULL,  -- read | query | compact
+
+    -- 访问上下文
+    context         JSONB DEFAULT '{}',
+
+    accessed_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_file_access_file ON file_access_logs(file_id);
+CREATE INDEX idx_file_access_time ON file_access_logs(accessed_at DESC);
+
+COMMENT ON TABLE file_access_logs IS '文件访问日志：记录文件访问行为，用于访问频率统计';
+
+-- =============================================================
 -- END OF DDL
 -- =============================================================

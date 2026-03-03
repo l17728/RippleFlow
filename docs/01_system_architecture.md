@@ -4248,6 +4248,341 @@ relation_weights:
 
 ---
 
+## 29. 文件系统分级索引与存储架构（新增）
+
+### 29.1 设计理念
+
+**核心原则**：文本优先、渐进披露、按需访问
+
+| 原则 | 说明 |
+|------|------|
+| **文本优先** | 使用 YAML/Markdown 存储，方便模型直接理解 |
+| **减少上下文** | 原文优先级最低，优先访问摘要和索引 |
+| **渐进披露** | 根据信息时效性自动降级，减少噪音 |
+| **按需访问** | 原文仅通过明确指令（查询文件、@命令）访问 |
+
+### 29.2 三级存储架构
+
+```
+.knowledge/                           # 知识库根目录
+├── index.yaml                        # 全局索引（入口）
+│
+├── L1-active/                        # 活跃层（0-30天）
+│   │                                 # 优先级最高，上下文直接可见
+│   ├── threads/                      # 活跃话题详情
+│   │   ├── 2026-03-redis-cluster.yaml
+│   │   └── 2026-03-auth-system.yaml
+│   │
+│   └── index.yaml                    # L1 索引（最近话题列表）
+│
+├── L2-archived/                      # 归档层（30-180天）
+│   │                                 # 摘要模式，原文需明确指定
+│   │
+│   ├── summaries/                    # 话题摘要（替代原文）
+│   │   ├── 2026-02-api-design.md     # 摘要文档
+│   │   └── 2026-01-db-migration.md
+│   │
+│   ├── originals/                    # 原始文件（压缩存储）
+│   │   └── 2026-02-api-design.yaml.gz
+│   │
+│   └── index.yaml                    # L2 索引（摘要列表）
+│
+└── L3-core/                          # 核心层（永久）
+│   │                                 # 高度抽象，知识图谱级别
+│   │
+│   ├── knowledge-graph.yaml          # 知识图谱（实体-关系）
+│   ├── decision-log.yaml             # 关键决策时间线
+│   ├── tech-stack.yaml               # 技术栈演进
+│   ├── glossary.yaml                 # 术语词典
+│   │
+│   └── index.yaml                    # L3 索引
+```
+
+### 29.3 各层定位
+
+| 层级 | 时间窗口 | 内容特征 | 访问方式 | 上下文策略 |
+|------|----------|----------|----------|------------|
+| **L1 活跃层** | 0-30天 | 详细、完整、实时 | 直接读取 | **默认加载** |
+| **L2 归档层** | 30-180天 | 摘要、结构化 | 摘要优先 | 按需加载摘要 |
+| **L3 核心层** | 永久 | 抽象、关联、推理 | 索引查询 | 索引始终加载 |
+
+### 29.4 信息降级规则
+
+```yaml
+# 配置文件：compact-rules.yaml
+
+compact_rules:
+  L1_to_L2:
+    trigger:
+      condition: "last_message_at > 30 days ago"
+      schedule: "0 2 * * *"  # 每天凌晨2点检查
+    action:
+      - name: "generate_summary"
+        description: "生成话题摘要"
+      - name: "compress_original"
+        description: "压缩原始文件"
+      - name: "update_index"
+        description: "更新索引"
+    preserve:
+      - "原始文件压缩保存"
+      - "摘要文件替代原文"
+      - "索引保留引用"
+
+  L2_to_L3:
+    trigger:
+      condition: "last_access_at > 180 days ago"
+      schedule: "0 3 * * 0"  # 每周日凌晨3点检查
+    action:
+      - name: "extract_entities"
+        description: "提取实体到知识图谱"
+      - name: "update_decision_log"
+        description: "更新决策时间线"
+    preserve:
+      - "摘要文件保留"
+      - "原始文件归档"
+```
+
+### 29.5 文件格式规范
+
+#### L1 活跃层格式
+
+```yaml
+# L1-active/threads/2026-03-redis-cluster.yaml
+
+id: "thread-uuid"
+title: "Redis 集群部署方案"
+category: "tech_decision"
+info_domain: "event"
+status: "active"
+
+# 时间信息
+created_at: "2026-03-01T10:00:00Z"
+last_message_at: "2026-03-03T15:30:00Z"
+message_count: 45
+
+# 活摘要（LLM维护）
+summary: |
+  讨论了 Redis 集群的部署方案，最终决定采用 3主3从架构，
+  使用 Sentinel 实现高可用。预计本周完成部署。
+
+# 关键决策
+decisions:
+  - content: "采用 3主3从架构"
+    decided_at: "2026-03-02T14:00:00Z"
+    decided_by: ["张三", "李四"]
+
+# 待办事项
+action_items:
+  - title: "申请服务器资源"
+    assignee: "张三"
+    status: "in_progress"
+    due_date: "2026-03-05"
+
+# 参与者
+stakeholders: ["张三", "李四", "王五"]
+
+# 消息列表（完整内容）
+messages:
+  - id: "msg-001"
+    sender: "张三"
+    sent_at: "2026-03-01T10:00:00Z"
+    content: "我们需要部署 Redis 集群..."
+  - id: "msg-002"
+    sender: "李四"
+    sent_at: "2026-03-01T10:05:00Z"
+    content: "建议使用 3主3从架构..."
+  # ... 更多消息
+```
+
+#### L2 归档层格式（摘要）
+
+```markdown
+# L2-archived/summaries/2026-02-api-design.md
+
+# API 设计方案讨论（已归档）
+
+> 归档时间：2026-03-05
+> 原始话题：thread-uuid-xxx
+> 消息数：78条
+> 参与者：张三、李四、王五
+
+## 摘要
+
+本次讨论确定了 API 设计规范，采用 RESTful 风格，统一响应格式。
+
+## 关键决策
+
+1. **API 风格**：RESTful，遵循 OpenAPI 3.0 规范
+2. **认证方式**：JWT Token，有效期 24 小时
+3. **版本控制**：URL 路径版本（/api/v1/）
+
+## 待办事项
+
+- [x] 完成设计文档
+- [x] 代码评审
+- [x] 上线测试环境
+
+## 相关链接
+
+- 设计文档：[链接]
+- 原始讨论：@file original:2026-02-api-design.yaml
+
+---
+*此摘要由系统自动生成，原文已压缩归档。使用 @file 命令查看原文。*
+```
+
+#### L3 核心层格式
+
+```yaml
+# L3-core/knowledge-graph.yaml
+
+nodes:
+  - id: "redis"
+    type: "technology"
+    name: "Redis"
+    attributes:
+      category: "database"
+      purpose: "缓存、会话存储"
+      first_used: "2024-01-15"
+      usage_count: 15
+
+  - id: "zhang_san"
+    type: "person"
+    name: "张三"
+    attributes:
+      role: "backend_developer"
+      expertise: ["redis", "postgresql", "python"]
+
+edges:
+  - source: "zhang_san"
+    target: "redis"
+    type: "expert_in"
+    weight: 4.5
+    evidence:
+      - thread_id: "thread-uuid-1"
+        count: 12
+```
+
+### 29.6 访问策略
+
+```python
+class FileAccessStrategy:
+    """文件访问策略"""
+
+    def get_context_files(self, query: str, time_range: str = None) -> List[str]:
+        """根据查询获取上下文文件"""
+        # 1. L3 核心层：始终加载索引
+        files = ["L3-core/index.yaml", "L3-core/knowledge-graph.yaml"]
+
+        # 2. L1 活跃层：根据时间范围加载
+        if time_range and time_range == "recent":
+            files.append("L1-active/index.yaml")
+            active_threads = self._match_active_threads(query)
+            files.extend(active_threads)
+
+        # 3. L2 归档层：仅在明确指定时加载摘要
+        # 不自动加载，减少上下文
+
+        return files
+
+    def get_file(self, file_ref: str) -> str:
+        """获取指定文件内容"""
+        if file_ref.startswith("@file original:"):
+            filename = file_ref.replace("@file original:", "")
+            return self._decompress_original(filename)
+        elif file_ref.startswith("@file summary:"):
+            filename = file_ref.replace("@file summary:", "")
+            return self._read_summary(filename)
+        else:
+            return self._read_summary_or_original(file_ref)
+```
+
+### 29.7 Compact（压缩）机制
+
+```python
+class CompactService:
+    """信息压缩服务"""
+
+    async def run_daily_compact(self):
+        """每日压缩任务"""
+        # 1. 查找需要降级的话题
+        candidates = await self._find_L1_candidates()  # > 30天
+
+        for thread in candidates:
+            # 2. 生成摘要
+            summary = await self._generate_summary(thread)
+
+            # 3. 写入 L2 摘要文件
+            await self._write_summary(thread, summary)
+
+            # 4. 压缩原始文件
+            await self._compress_original(thread)
+
+            # 5. 更新索引
+            await self._update_index(thread, "L2")
+
+            # 6. 删除 L1 文件
+            await self._remove_L1_file(thread)
+```
+
+### 29.8 API 设计
+
+```yaml
+/api/v1/files/context:
+  get:
+    summary: 获取上下文文件列表
+
+/api/v1/files/{file_path}:
+  get:
+    summary: 获取文件内容
+    parameters:
+      - name: prefer
+        in: header
+        enum: [summary, original]
+        default: summary
+
+/api/v1/files/compact:
+  post:
+    summary: 手动触发压缩
+```
+
+### 29.9 查询命令
+
+```
+@file <path>              # 查看文件
+@file original:<name>     # 查看原文（解压）
+@file summary:<name>      # 查看摘要
+@recent                   # 查看最近活跃话题
+@archive                  # 查看归档话题列表
+@compact <thread_id>      # 手动压缩话题
+```
+
+### 29.10 配置项
+
+```yaml
+file_system:
+  root: ".knowledge/"
+
+  layers:
+    L1_active:
+      retention_days: 30
+      max_files: 100
+
+    L2_archived:
+      retention_days: 180
+      max_summary_length: 500
+      compress_original: true
+
+    L3_core:
+      permanent: true
+
+  compact:
+    schedule: "0 2 * * *"
+    batch_size: 50
+```
+
+---
+
 **END OF DOCUMENT**
 ```
 
