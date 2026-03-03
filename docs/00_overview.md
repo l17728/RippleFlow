@@ -327,7 +327,7 @@ butler_experience_memory:
           ┌────────────────┼────────────────────┐
           ▼                ▼                    ▼
 ┌─────────────────────┐  ┌──────────────────┐  ┌──────────────────────┐
-│  Service Layer      │  │  Redis           │  │  LLM API             │
+│  Service Layer      │  │  内存缓存/Redis  │  │  LLM API             │
 │                     │  │                  │  │                      │
 │  MessageService     │  │  - Celery 队列    │  │  (公司内部部署)       │
 │  ThreadService      │  │  - 会话 Token     │  │                      │

@@ -747,11 +747,24 @@ butler_prompts/
 
 ## 14. 缓存策略（补充）
 
-### 14.1 Redis 缓存分层
+### 14.1 缓存方案选型
+
+系统支持两种缓存方案，可根据业务规模选择：
+
+| 场景 | 推荐方案 | 原因 |
+|------|----------|------|
+| **小型团队** / 单实例 | 内存缓存 | 零依赖、简单、进程内 |
+| **大型团队** / 多实例 | Redis | 支持跨进程共享、持久化 |
+
+**当前默认：内存缓存**
+
+### 14.2 内存缓存架构
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                     Redis 缓存架构                               │
+│                    内存缓存架构 (Python)                         │
+│                                                                 │
+│  实现方式: cachetools 库或自实现 TTLCache                        │
 │                                                                 │
 │  L1 - 会话缓存 (TTL: 24h)                                        │
 │  ├── session:{user_id} → JWT payload                            │
@@ -771,47 +784,114 @@ butler_prompts/
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 14.2 缓存策略详情
+### 14.3 实现代码
+
+```python
+from cachetools import TTLCache
+from functools import wraps
+import hashlib
+
+class CacheManager:
+    """轻量级内存缓存管理器"""
+
+    def __init__(self):
+        # 各层缓存配置
+        self._caches = {
+            'session': TTLCache(maxsize=1000, ttl=86400),      # 24h
+            'search': TTLCache(maxsize=500, ttl=300),          # 5min
+            'hot': TTLCache(maxsize=2000, ttl=3600),           # 1h
+            'reference': TTLCache(maxsize=500, ttl=86400),     # 24h
+        }
+
+    def get(self, cache_type: str, key: str):
+        """获取缓存"""
+        cache = self._caches.get(cache_type)
+        if cache and key in cache:
+            return cache[key]
+        return None
+
+    def set(self, cache_type: str, key: str, value):
+        """设置缓存"""
+        cache = self._caches.get(cache_type)
+        if cache:
+            cache[key] = value
+
+    def delete(self, cache_type: str, key: str):
+        """删除缓存"""
+        cache = self._caches.get(cache_type)
+        if cache and key in cache:
+            del cache[key]
+
+    def clear(self, cache_type: str = None):
+        """清空缓存"""
+        if cache_type:
+            self._caches.get(cache_type, {}).clear()
+        else:
+            for cache in self._caches.values():
+                cache.clear()
+
+    @staticmethod
+    def hash_key(*args) -> str:
+        """生成缓存 key 哈希"""
+        data = '|'.join(str(a) for a in args)
+        return hashlib.md5(data.encode()).hexdigest()
+
+
+# 全局缓存实例
+cache = CacheManager()
+```
+
+### 14.4 缓存策略详情
 
 | 缓存类型 | Key 格式 | TTL | 失效策略 |
 |----------|----------|-----|----------|
-| 搜索结果 | `search:{md5(query+filters)}` | 5 分钟 | 话题更新时删除相关 query |
-| 问答答案 | `qa:{md5(question)}` | 5 分钟 | 来源话题更新时删除 |
+| 搜索结果 | `search:{md5(query+filters)}` | 5 分钟 | 话题更新时清空 search 缓存 |
+| 问答答案 | `qa:{md5(question)}` | 5 分钟 | 来源话题更新时清空 |
 | 用户权限 | `perm:{user_id}` | 1 小时 | 白名单变更时删除 |
 | 待办统计 | `todos:{user_id}` | 10 分钟 | 待办状态变更时删除 |
 | 参考数据 | `ref:{service}:{env}` | 24 小时 | 参考数据更新时删除 |
 | 通知计数 | `notif:{user_id}` | 5 分钟 | 实时更新 |
 
-### 14.3 缓存更新策略
+### 14.5 内存缓存 vs Redis
+
+| 维度 | 内存缓存 | Redis |
+|------|----------|-------|
+| **依赖** | 零依赖 | 需要部署 Redis 服务 |
+| **数据共享** | 进程内，无法跨进程 | 多进程共享 |
+| **持久化** | 重启丢失 | 支持 RDB/AOF |
+| **内存限制** | 受进程内存限制 | 独立进程，可配置上限 |
+| **适用场景** | 单实例、小型团队 | 多实例、高并发 |
+
+### 14.6 迁移路径
 
 ```
-写入策略: Write-Through
-  - 数据更新时同步更新缓存
-  - 保证数据一致性
-
-删除策略: Lazy Deletion
-  - 搜索缓存：话题更新时删除相关 query hash
-  - 通过 pattern match 批量删除
-
-预热策略:
-  - 系统启动时预热热门搜索
-  - 每日定时预热高频访问话题
+内存缓存 (当前默认)
+    │
+    ├── 业务规模增长
+    │
+    ├── 需要多实例协作
+    │
+    └── 迁移到 Redis
 ```
 
-### 14.4 缓存监控
+### 14.7 Redis 方案（可选）
+
+当业务规模增长时，可切换到 Redis：
 
 ```yaml
-监控指标:
-  - redis_memory_used_bytes          # 内存使用量
-  - redis_cache_hit_ratio            # 缓存命中率
-  - redis_key_count{cache_type}      # 各类缓存 key 数量
-  - redis_eviction_count             # 驱逐次数
+# config.yaml
+cache:
+  backend: "memory"  # memory | redis
 
-告警规则:
-  - 内存使用 > 80%: 警告
-  - 缓存命中率 < 50%: 警告
-  - 驱逐次数 > 100/min: 警告
+  redis:
+    host: "localhost"
+    port: 6379
+    db: 0
+    password: "${REDIS_PASSWORD}"
+    max_connections: 10
 ```
+
+Redis 架构详见历史版本文档。
 
 ---
 
