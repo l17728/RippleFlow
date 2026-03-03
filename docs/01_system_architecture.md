@@ -5503,6 +5503,806 @@ def list(category, status, page, size, output):
     formatter.output(result, format=output)
 ```
 
+### 31.10 输出格式规范
+
+#### 31.10.1 格式选择
+
+```bash
+# 默认：人类可读的表格格式
+rf threads list
+
+# JSON 格式：供程序解析（nullclaw 使用）
+rf threads list -o json
+
+# YAML 格式：配置文件友好
+rf threads list -o yaml
+```
+
+#### 31.10.2 JSON 输出规范
+
+**通用响应结构**：
+
+```json
+{
+  "success": true,
+  "data": { ... },
+  "meta": {
+    "timestamp": "2026-03-03T10:30:00Z",
+    "version": "1.0"
+  }
+}
+```
+
+**列表响应结构**：
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [...],
+    "pagination": {
+      "page": 1,
+      "size": 20,
+      "total": 156,
+      "total_pages": 8
+    }
+  }
+}
+```
+
+**错误响应结构**：
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "RESOURCE_NOT_FOUND",
+    "message": "话题不存在",
+    "details": {
+      "resource": "thread",
+      "id": "abc-123"
+    }
+  }
+}
+```
+
+#### 31.10.3 各命令输出示例
+
+##### rf threads list
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "550e8400-e29b-41d4-a716-446655440001",
+        "title": "Redis 连接池配置方案",
+        "category": "qa_faq",
+        "status": "active",
+        "room": {
+          "id": "room-001",
+          "name": "技术讨论群"
+        },
+        "summary": "推荐使用 lettuce 连接池...",
+        "confidence": 0.92,
+        "message_count": 12,
+        "created_at": "2026-03-01T14:30:00Z",
+        "last_message_at": "2026-03-02T09:15:00Z"
+      }
+    ],
+    "pagination": {
+      "page": 1,
+      "size": 20,
+      "total": 156,
+      "total_pages": 8
+    }
+  }
+}
+```
+
+##### rf threads get
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "550e8400-e29b-41d4-a716-446655440001",
+    "title": "Redis 连接池配置方案",
+    "category": "qa_faq",
+    "info_domain": "knowledge",
+    "status": "active",
+    "room": {
+      "id": "room-001",
+      "name": "技术讨论群"
+    },
+    "summary": "推荐使用 lettuce 连接池，配置参数：\n- maxTotal: 100\n- maxIdle: 50\n- minIdle: 10\n- timeout: 3000ms",
+    "summary_version": 3,
+    "confidence": 0.92,
+    "participants": [
+      {"user_id": "user-001", "display_name": "张三"},
+      {"user_id": "user-002", "display_name": "李四"}
+    ],
+    "messages": [
+      {
+        "id": "msg-001",
+        "sender": "张三",
+        "content": "Redis 连接池怎么配置？",
+        "timestamp": "2026-03-01T14:30:00Z"
+      }
+    ],
+    "action_items": [],
+    "related_threads": [],
+    "created_at": "2026-03-01T14:30:00Z",
+    "updated_at": "2026-03-02T09:15:00Z"
+  }
+}
+```
+
+##### rf threads search
+
+```json
+{
+  "success": true,
+  "data": {
+    "query": "Redis配置",
+    "items": [
+      {
+        "id": "550e8400-e29b-41d4-a716-446655440001",
+        "title": "Redis 连接池配置方案",
+        "category": "qa_faq",
+        "summary_snippet": "...推荐使用 lettuce 连接池...",
+        "relevance_score": 0.95,
+        "room_name": "技术讨论群"
+      }
+    ],
+    "total": 5,
+    "search_time_ms": 23
+  }
+}
+```
+
+##### rf qa
+
+```json
+{
+  "success": true,
+  "data": {
+    "question": "如何配置 Redis 连接池",
+    "answer": "根据群内讨论，推荐使用 lettuce 连接池，主要配置参数如下：\n\n1. maxTotal: 100（最大连接数）\n2. maxIdle: 50（最大空闲连接）\n3. minIdle: 10（最小空闲连接）\n4. timeout: 3000ms（超时时间）\n\n示例代码见话题详情。",
+    "sources": [
+      {
+        "thread_id": "550e8400-e29b-41d4-a716-446655440001",
+        "title": "Redis 连接池配置方案",
+        "relevance": 0.95
+      }
+    ],
+    "confidence": 0.88,
+    "thread_id": "550e8400-e29b-41d4-a716-446655440001"
+  }
+}
+```
+
+##### rf todos list
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "todo-001",
+        "title": "完成部署文档",
+        "status": "open",
+        "priority": "high",
+        "due_date": "2026-03-10",
+        "days_until_due": 7,
+        "thread": {
+          "id": "thread-001",
+          "title": "部署流程讨论"
+        },
+        "created_at": "2026-03-03T10:00:00Z"
+      }
+    ],
+    "summary": {
+      "total": 5,
+      "open": 3,
+      "in_progress": 1,
+      "overdue": 1
+    }
+  }
+}
+```
+
+##### rf todos add
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "todo-002",
+    "title": "完成部署文档",
+    "status": "open",
+    "priority": "high",
+    "due_date": "2026-03-10",
+    "created_at": "2026-03-03T10:30:00Z"
+  },
+  "message": "待办创建成功"
+}
+```
+
+##### rf sensitive pending
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "auth-001",
+        "thread_id": "thread-001",
+        "thread_title": "数据库连接配置",
+        "detected_type": "password",
+        "detected_at": "2026-03-02T15:00:00Z",
+        "pending_days": 1,
+        "required_approvals": 2,
+        "current_approvals": 0,
+        "approvers": [
+          {"user_id": "user-001", "display_name": "张三", "status": "pending"},
+          {"user_id": "user-002", "display_name": "李四", "status": "pending"}
+        ]
+      }
+    ],
+    "total": 3,
+    "escalation_candidates": 1
+  }
+}
+```
+
+##### rf sensitive decide
+
+```json
+{
+  "success": true,
+  "data": {
+    "auth_id": "auth-001",
+    "decision": "approve",
+    "decided_at": "2026-03-03T10:30:00Z",
+    "overall_status": "pending",
+    "remaining_approvals": 1
+  },
+  "message": "决策已记录"
+}
+```
+
+##### rf butler digest
+
+```json
+{
+  "success": true,
+  "data": {
+    "digest_id": "digest-001",
+    "type": "daily",
+    "room_id": "room-001",
+    "period": {
+      "from": "2026-03-02T00:00:00Z",
+      "to": "2026-03-02T23:59:59Z"
+    },
+    "content": "## 每日快报 (2026-03-02)\n\n### 热门话题\n1. Redis 连接池配置方案 (12 条消息)\n2. ...\n\n### 新增待办\n- 完成部署文档 (张三, 截止: 03-10)\n\n### 问答精选\nQ: Redis 连接池怎么配置？\nA: 推荐使用 lettuce...",
+    "sent_at": "2026-03-03T09:00:00Z",
+    "recipient_count": 25
+  }
+}
+```
+
+##### rf butler health
+
+```json
+{
+  "success": true,
+  "data": {
+    "status": "healthy",
+    "checks": {
+      "database": {"status": "ok", "latency_ms": 5},
+      "llm": {"status": "ok", "latency_ms": 120},
+      "cache": {"status": "ok", "latency_ms": 1}
+    },
+    "metrics": {
+      "threads_total": 1523,
+      "threads_active": 89,
+      "messages_total": 45678,
+      "pending_actions": 12,
+      "pending_sensitive": 3
+    },
+    "period_stats": {
+      "threads_today": 5,
+      "qa_today": 12,
+      "actions_completed_today": 3
+    }
+  }
+}
+```
+
+##### rf collaboration network
+
+```json
+{
+  "success": true,
+  "data": {
+    "nodes": [
+      {"id": "user-001", "name": "张三", "weight": 45},
+      {"id": "user-002", "name": "李四", "weight": 38}
+    ],
+    "edges": [
+      {
+        "source": "user-001",
+        "target": "user-002",
+        "weight": 12,
+        "types": ["reply", "mention"]
+      }
+    ],
+    "period": {
+      "from": "2026-02-01",
+      "to": "2026-03-03"
+    },
+    "stats": {
+      "total_interactions": 156,
+      "avg_interactions_per_user": 8.2
+    }
+  }
+}
+```
+
+##### rf import wechat
+
+```json
+{
+  "success": true,
+  "data": {
+    "job_id": "import-001",
+    "status": "processing",
+    "file": "chat_history_20260303.json",
+    "room_id": "room-001",
+    "progress": {
+      "total": 1000,
+      "processed": 450,
+      "imported": 420,
+      "skipped": 30,
+      "percentage": 45
+    },
+    "started_at": "2026-03-03T10:00:00Z",
+    "estimated_completion": "2026-03-03T10:15:00Z"
+  }
+}
+```
+
+##### rf admin whitelist list
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "ldap_user_id": "zhangsan",
+        "display_name": "张三",
+        "email": "zhangsan@example.com",
+        "role": "member",
+        "is_active": true,
+        "added_at": "2026-01-15T08:00:00Z",
+        "added_by": "admin"
+      }
+    ],
+    "total": 25,
+    "admins": 3,
+    "members": 22
+  }
+}
+```
+
+#### 31.10.4 Table 输出格式
+
+**默认表格格式**（人类可读）：
+
+```
+$ rf threads list --category qa_faq
+
+ID          TITLE                        CATEGORY   STATUS   ROOM         MESSAGES
+─────────────────────────────────────────────────────────────────────────────────────
+550e8400... Redis 连接池配置方案         qa_faq     active   技术讨论群   12
+6ba7b810... Docker 网络配置问题          qa_faq     active   运维群       8
+3f2e8d90... 如何调试 Kafka 消费延迟      qa_faq     resolved 技术讨论群   15
+
+共 3 条 (第 1 页，共 1 页)
+```
+
+**详细表格格式**（`--verbose`）：
+
+```
+$ rf threads get 550e8400-e29b-41d4-a716-446655440001
+
+话题详情
+────────────────────────────────────────────────────────────
+ID:           550e8400-e29b-41d4-a716-446655440001
+标题:         Redis 连接池配置方案
+类别:         qa_faq (知识库)
+状态:         active
+置信度:       92%
+创建时间:     2026-03-01 14:30:00
+最后消息:     2026-03-02 09:15:00
+
+摘要:
+  推荐使用 lettuce 连接池，配置参数：
+  - maxTotal: 100
+  - maxIdle: 50
+  - minIdle: 10
+  - timeout: 3000ms
+
+参与者: 张三, 李四, 王五
+消息数: 12
+待办项: 0
+```
+
+#### 31.10.5 YAML 输出格式
+
+```yaml
+$ rf threads list -o yaml
+
+success: true
+data:
+  items:
+    - id: 550e8400-e29b-41d4-a716-446655440001
+      title: Redis 连接池配置方案
+      category: qa_faq
+      status: active
+      room:
+        id: room-001
+        name: 技术讨论群
+      message_count: 12
+  pagination:
+    page: 1
+    size: 20
+    total: 156
+```
+
+### 31.11 错误码规范
+
+#### 31.11.1 错误码结构
+
+```
+错误码格式: <类别>_<具体错误>
+
+类别:
+- AUTH      认证相关
+- RESOURCE  资源相关
+- VALIDATE  参数验证
+- BUSINESS  业务逻辑
+- SYSTEM    系统错误
+```
+
+#### 31.11.2 标准错误码列表
+
+| 错误码 | HTTP 状态码 | 说明 | 场景 |
+|--------|-------------|------|------|
+| `AUTH_UNAUTHORIZED` | 401 | 未登录 | Token 无效或过期 |
+| `AUTH_FORBIDDEN` | 403 | 无权限 | 非白名单用户 |
+| `AUTH_TOKEN_EXPIRED` | 401 | Token 过期 | 需要重新登录 |
+| `AUTH_SSO_FAILED` | 401 | SSO 登录失败 | LDAP 认证失败 |
+| `RESOURCE_NOT_FOUND` | 404 | 资源不存在 | 话题/待办/用户不存在 |
+| `RESOURCE_DELETED` | 410 | 资源已删除 | 话题已归档删除 |
+| `RESOURCE_CONFLICT` | 409 | 资源冲突 | 重复创建 |
+| `VALIDATE_MISSING_PARAM` | 400 | 缺少参数 | 必填参数未提供 |
+| `VALIDATE_INVALID_PARAM` | 400 | 参数无效 | 参数格式/值错误 |
+| `VALIDATE_OUT_OF_RANGE` | 400 | 参数超出范围 | page/size 超限 |
+| `BUSINESS_SENSITIVE_PENDING` | 403 | 敏感内容待授权 | 话题未完成授权 |
+| `BUSINESS_NOT_PARTICIPANT` | 403 | 非话题参与者 | 无权修改话题 |
+| `BUSINESS_ACTION_COMPLETED` | 409 | 任务已完成 | 重复操作已完成任务 |
+| `BUSINESS_ESCALATION_REQUIRED` | 403 | 需要升级处理 | 敏感授权超时 |
+| `SYSTEM_DATABASE_ERROR` | 500 | 数据库错误 | 连接/查询失败 |
+| `SYSTEM_LLM_ERROR` | 503 | LLM 服务错误 | 模型调用失败 |
+| `SYSTEM_RATE_LIMITED` | 429 | 请求频率限制 | 超过限流阈值 |
+| `SYSTEM_MAINTENANCE` | 503 | 系统维护中 | 服务不可用 |
+
+#### 31.11.3 错误响应示例
+
+**参数验证错误**：
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "VALIDATE_INVALID_PARAM",
+    "message": "参数格式错误",
+    "details": {
+      "field": "category",
+      "value": "invalid_cat",
+      "allowed": ["tech_decision", "qa_faq", "bug_incident", ...]
+    }
+  }
+}
+```
+
+**资源不存在错误**：
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "RESOURCE_NOT_FOUND",
+    "message": "话题不存在",
+    "details": {
+      "resource": "thread",
+      "id": "550e8400-e29b-41d4-a716-446655440099"
+    }
+  }
+}
+```
+
+**业务逻辑错误**：
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "BUSINESS_SENSITIVE_PENDING",
+    "message": "话题包含敏感内容，等待授权",
+    "details": {
+      "thread_id": "550e8400-e29b-41d4-a716-446655440001",
+      "pending_authorizations": 2,
+      "can_view": false
+    }
+  }
+}
+```
+
+**系统错误**：
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "SYSTEM_LLM_ERROR",
+    "message": "LLM 服务暂时不可用",
+    "details": {
+      "provider": "zhipu",
+      "model": "glm-4-plus",
+      "retry_after": 30
+    }
+  }
+}
+```
+
+#### 31.11.4 错误处理最佳实践
+
+```bash
+# 检查命令执行结果
+$ rf threads get invalid-id
+Error: RESOURCE_NOT_FOUND - 话题不存在
+
+# JSON 格式下解析错误
+$ rf threads get invalid-id -o json
+{"success": false, "error": {"code": "RESOURCE_NOT_FOUND", ...}}
+
+# 检查退出码
+$ rf threads get invalid-id
+$ echo $?
+1
+```
+
+### 31.12 退出码规范
+
+#### 31.12.1 标准退出码
+
+| 退出码 | 含义 | 说明 |
+|--------|------|------|
+| 0 | 成功 | 命令执行成功 |
+| 1 | 一般错误 | 未分类错误 |
+| 2 | 参数错误 | 命令参数无效 |
+| 3 | 认证错误 | 未登录或 Token 无效 |
+| 4 | 权限错误 | 无操作权限 |
+| 5 | 资源错误 | 资源不存在或已删除 |
+| 6 | 业务错误 | 业务逻辑约束冲突 |
+| 7 | 系统错误 | 服务不可用 |
+| 8 | 网络错误 | 连接超时或失败 |
+| 130 | 用户中断 | Ctrl+C 中断 |
+
+#### 31.12.2 退出码映射表
+
+| 错误码类别 | 退出码 |
+|------------|--------|
+| `AUTH_*` | 3 |
+| `RESOURCE_*` | 5 |
+| `VALIDATE_*` | 2 |
+| `BUSINESS_*` | 6 |
+| `SYSTEM_*` | 7 |
+
+#### 31.12.3 脚本集成示例
+
+```bash
+#!/bin/bash
+# nullclaw Routine 脚本示例
+
+# 执行命令并检查退出码
+rf threads search "Redis配置" -o json > /tmp/result.json
+exit_code=$?
+
+case $exit_code in
+  0)
+    # 成功，处理结果
+    cat /tmp/result.json | jq '.data.items[]'
+    ;;
+  3)
+    # 认证错误，尝试重新登录
+    rf auth login --sso
+    ;;
+  7)
+    # 系统错误，等待重试
+    sleep 30
+    # 重试逻辑...
+    ;;
+  *)
+    # 其他错误，记录日志
+    echo "命令执行失败: exit code $exit_code" >&2
+    ;;
+esac
+```
+
+### 31.13 完整命令参数规范
+
+#### 31.13.1 参数类型
+
+| 类型 | 格式 | 示例 |
+|------|------|------|
+| `string` | 文本 | `--title "部署文档"` |
+| `integer` | 整数 | `--size 50` |
+| `float` | 浮点数 | `--min-weight 0.5` |
+| `boolean` | 布尔值 | `--verbose`, `--no-cache` |
+| `date` | 日期 | `--due 2026-03-10` |
+| `datetime` | 日期时间 | `--from "2026-03-01T00:00:00Z"` |
+| `enum` | 枚举值 | `--status active` |
+| `list` | 列表 | `--tags tag1,tag2,tag3` |
+| `path` | 文件路径 | `--file ./data.json` |
+
+#### 31.13.2 通用分页参数
+
+```
+--page <n>          页码（从 1 开始）
+--size <n>          每页数量（默认 20，最大 100）
+--cursor <token>    游标分页（替代 page/size）
+--no-pagination     禁用分页，返回全部
+```
+
+#### 31.13.3 通用过滤参数
+
+```
+--from <datetime>   起始时间
+--to <datetime>     结束时间
+--room <room_id>    群组过滤
+--user <user_id>    用户过滤
+--status <status>   状态过滤
+--category <cat>    类别过滤
+```
+
+#### 31.13.4 通用输出参数
+
+```
+-o, --output <format>     输出格式：json | table | yaml
+-f, --fields <fields>     指定输出字段（逗号分隔）
+--no-header               表格输出不显示表头
+--no-footer               表格输出不显示统计行
+--wrap                    表格输出自动换行
+--width <n>               表格输出宽度
+```
+
+### 31.14 命令完整参数速查表
+
+#### rf threads list
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--category` | enum | - | 类别过滤 |
+| `--domain` | enum | - | 四大类过滤 |
+| `--status` | enum | - | 状态过滤 |
+| `--room` | string | - | 群组 ID |
+| `--from` | date | - | 起始日期 |
+| `--to` | date | - | 结束日期 |
+| `--page` | int | 1 | 页码 |
+| `--size` | int | 20 | 每页数量 |
+| `--sort` | string | `-last_message_at` | 排序字段 |
+| `-o` | enum | table | 输出格式 |
+
+#### rf threads search
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `<query>` | string | - | 搜索关键词（必填） |
+| `--category` | enum | - | 类别过滤 |
+| `--domain` | enum | - | 四大类过滤 |
+| `--room` | string | - | 群组过滤 |
+| `--from` | date | - | 起始日期 |
+| `--to` | date | - | 结束日期 |
+| `--ignore-window` | flag | - | 忽略时间窗口 |
+| `--size` | int | 10 | 结果数量 |
+| `-o` | enum | table | 输出格式 |
+
+#### rf qa
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `<question>` | string | - | 问题（必填） |
+| `--category` | enum | - | 类别限定 |
+| `--ignore-window` | flag | - | 忽略时间窗口 |
+| `--no-summary` | flag | - | 不生成摘要 |
+| `-o` | enum | json | 输出格式 |
+
+#### rf todos list
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--status` | enum | - | 状态过滤（open, in_progress, done, cancelled） |
+| `--due-before` | date | - | 截止日期之前 |
+| `--due-after` | date | - | 截止日期之后 |
+| `--overdue` | flag | - | 仅显示过期 |
+| `--priority` | enum | - | 优先级过滤 |
+| `--include-collab` | flag | - | 包含协作者待办 |
+| `--page` | int | 1 | 页码 |
+| `--size` | int | 20 | 每页数量 |
+| `-o` | enum | table | 输出格式 |
+
+#### rf todos add
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `<title>` | string | - | 待办标题（必填） |
+| `--description` | string | - | 详细描述 |
+| `--due` | date | - | 截止日期 |
+| `--priority` | enum | medium | 优先级（high, medium, low） |
+| `--tags` | list | - | 标签（逗号分隔） |
+| `--collaborators` | list | - | 协作者（逗号分隔） |
+| `--thread` | string | - | 关联话题 ID |
+| `-o` | enum | json | 输出格式 |
+
+#### rf sensitive pending
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--room` | string | - | 群组过滤 |
+| `--days` | int | - | 等待天数过滤 |
+| `--escalation-candidates` | flag | - | 仅显示升级候选 |
+| `-o` | enum | table | 输出格式 |
+
+#### rf sensitive decide
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `<auth_id>` | string | - | 授权 ID（必填） |
+| `--decision` | enum | - | 决策（approve, reject, desensitize）|
+| `--note` | string | - | 备注 |
+| `--desensitized` | string | - | 脱敏内容（desensitize 时必填） |
+| `-o` | enum | json | 输出格式 |
+
+#### rf butler digest
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--room` | string | - | 目标群组 ID（必填） |
+| `--type` | enum | daily | 快报类型（daily, weekly） |
+| `--date` | date | 今天 | 快报日期 |
+| `--dry-run` | flag | - | 仅生成不发送 |
+| `-o` | enum | json | 输出格式 |
+
+#### rf import wechat
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--file` | path | - | 导入文件路径（必填） |
+| `--room` | string | - | 目标群组 ID |
+| `--format` | enum | auto | 文件格式（auto, json, csv） |
+| `--encoding` | string | utf-8 | 文件编码 |
+| `--reprocess` | flag | - | 重新处理已存在消息 |
+| `--dry-run` | flag | - | 预览模式 |
+| `-o` | enum | json | 输出格式 |
+
 ---
 
 **END OF DOCUMENT**
