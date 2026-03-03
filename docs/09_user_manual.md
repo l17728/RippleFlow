@@ -127,7 +127,7 @@ flowchart TD
 
 ### 3.2 搜索与问答
 
-**全文搜索**：基于PostgreSQL全文检索，支持关键词、类别、时间筛选
+**全文搜索**：基于数据库全文检索（SQLite FTS5 或 PostgreSQL），支持关键词、类别、时间筛选
 
 **智能问答**：
 - LLM理解用户问题
@@ -182,7 +182,7 @@ graph TB
     
     subgraph 后端服务
         D[FastAPI服务]
-        E[PostgreSQL]
+        E[(数据库<br/>SQLite/PostgreSQL)]
         F[LLM服务]
     end
     
@@ -941,7 +941,7 @@ graph TB
     end
     
     subgraph 数据层
-        DB[(PostgreSQL)]
+        DB[(数据库<br/>SQLite/PostgreSQL)]
         Cache[(Redis)]
     end
     
@@ -993,7 +993,7 @@ sequenceDiagram
     participant Worker as ProcessingWorker
     participant LLM as LLMService
     participant Thread as ThreadService
-    participant DB as PostgreSQL
+    participant DB as 数据库
     
     Chat->>Webhook: POST /webhook/message
     Webhook->>Msg: ingest(dto)
@@ -1043,7 +1043,7 @@ sequenceDiagram
     participant UI as Dashboard/机器人
     participant API as SearchService
     participant LLM as LLMService
-    participant DB as PostgreSQL
+    participant DB as 数据库
     
     User->>UI: 提问: "Redis超时怎么处理？"
     UI->>API: answer_question(question)

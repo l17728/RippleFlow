@@ -335,7 +335,7 @@ class IThreadService(Protocol):
     ) -> tuple[list[dict], int]:
         """
         分页查询话题线索。
-        query 触发 PostgreSQL 全文检索（tsvector）。
+        query 触发数据库全文检索（SQLite FTS5 或 PostgreSQL tsvector）。
         ignore_window=False 时按类别的 search_window_days 过滤。
         返回 (items, total)。
         """
@@ -422,9 +422,10 @@ class ISearchService(Protocol):
         size: int = 20,
     ) -> tuple[list[SearchHit], int]:
         """
-        PostgreSQL 全文检索。
-        1. pg_trgm / tsvector 匹配 title + summary + tags。
-        2. 按 category 的 search_window_days 时间过滤（ignore_window=False）。
+        数据库全文检索。
+        - SQLite: FTS5 匹配 title + summary
+        - PostgreSQL: pg_trgm / tsvector 匹配 title + summary + tags
+        按 category 的 search_window_days 时间过滤（ignore_window=False）。
         返回 (hits, total)。
         """
         ...

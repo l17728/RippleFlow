@@ -733,7 +733,7 @@ extensions:
 
 ## 9. 数据库设计
 
-详见 `02_database_ddl.sql`，关键表：
+详见 `02_database_ddl.sql` (PostgreSQL) 或 `02b_database_ddl_sqlite.sql` (SQLite)，关键表：
 
 - `butler_tasks`: 管家任务记录
 - `butler_experience`: 管家经验知识库
