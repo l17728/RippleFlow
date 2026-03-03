@@ -3749,4 +3749,312 @@ CREATE INDEX idx_platform_users ON platform_users(platform, platform_user_id);
 
 ---
 
+## 27. 微信群对接架构（新增）
+
+### 27.1 概述
+
+微信个人号没有官方开放 API，本系统采用**混合架构**实现微信群消息接入：
+
+| 方案 | 说明 | 实时性 | 风险 |
+|------|------|--------|------|
+| **Wechaty 实时同步** | 小号 + 只读模式 | 实时 | ⚠️ 中等 |
+| **批量导入增量更新** | 手动上传 + 时间戳过滤 | 非实时 | ✅ 无 |
+
+**混合架构**：实时通道优先，批量导入兜底。
+
+### 27.2 架构设计
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    微信消息接入架构                              │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                实时通道 (Wechaty)                        │   │
+│  │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐  │   │
+│  │  │ 小号登录    │───→│ 只收消息    │───→│ 推送到队列  │  │   │
+│  │  │ iPad协议    │    │ 不主动发送  │    │ 处理流水线  │  │   │
+│  │  └─────────────┘    └─────────────┘    └─────────────┘  │   │
+│  │         ⚠️ 有风险但只读模式风险较低                        │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                              │                                  │
+│                              ▼ 断开时自动切换                    │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                批量导入通道（增量更新）                   │   │
+│  │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐  │   │
+│  │  │ 上传文件    │───→│ 时间戳过滤  │───→│ 去重入库    │  │   │
+│  │  │ 多格式解析  │    │ 只导入新增  │    │ 补齐缺失    │  │   │
+│  │  └─────────────┘    └─────────────┘    └─────────────┘  │   │
+│  │         ✅ 稳定可靠，作为兜底方案                          │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                   同步状态追踪                           │   │
+│  │  - 记录每个群的最后同步时间                               │   │
+│  │  - 追踪实时通道在线状态                                   │   │
+│  │  - 支持断点续传                                           │   │
+│  └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 27.3 Wechaty 实时同步服务
+
+```python
+# wechat_sync_service.py
+from wechaty import Wechaty, Message
+from typing import Optional
+
+class WechatSyncService:
+    """微信实时同步服务（只读模式）"""
+
+    def __init__(self):
+        self.bot: Optional[Wechaty] = None
+        self.sync_mode = "readonly"  # 只读模式，不主动发送
+        self.monitored_rooms: set[str] = set()
+
+    async def start(self, room_ids: list[str]):
+        """启动同步（使用小号）"""
+        self.bot = WechatyBuilder.build(
+            puppet="wechaty-puppet-service",
+            token=settings.WECHATY_TOKEN
+        )
+
+        self.monitored_rooms = set(room_ids)
+
+        # 注册消息监听
+        self.bot.on("message", self._on_message)
+        self.bot.on("login", self._on_login)
+        self.bot.on("logout", self._on_logout)
+
+        await self.bot.start()
+
+    async def _on_message(self, message: Message):
+        """消息回调（只收不发）"""
+        try:
+            # 只处理群消息
+            room = message.room()
+            if not room:
+                return
+
+            room_id = room.room_id
+
+            # 只处理监控的群
+            if room_id not in self.monitored_rooms:
+                return
+
+            # 转换为统一格式
+            unified = await self._normalize_message(message)
+
+            # 推送到处理队列
+            await message_queue.push(unified)
+
+            # 更新同步状态
+            await self._update_sync_status(unified)
+
+        except Exception as e:
+            logger.error(f"Error processing message: {e}")
+
+    async def stop(self):
+        """停止同步"""
+        if self.bot:
+            await self.bot.stop()
+            self.bot = None
+            await self._update_realtime_status("offline")
+```
+
+### 27.4 增量导入服务
+
+```python
+# incremental_import_service.py
+import hashlib
+from datetime import datetime
+
+class IncrementalImportService:
+    """增量导入服务"""
+
+    async def import_incremental(
+        self,
+        room_id: str,
+        file_path: str,
+        format: str,
+        options: dict = None
+    ) -> ImportResult:
+        """增量导入消息"""
+
+        # 1. 获取最后同步时间
+        last_sync = await self._get_last_sync_time(room_id)
+
+        # 2. 解析文件
+        parser = self._get_parser(format)
+        messages = await parser.parse(file_path)
+
+        # 3. 时间戳过滤：只保留新消息
+        new_messages = [
+            m for m in messages
+            if m.sent_at > last_sync
+        ]
+
+        # 4. 去重检查（发送者+时间+内容哈希）
+        deduped = await self._deduplicate(room_id, new_messages)
+
+        # 5. 批量处理
+        result = await self._batch_process(room_id, deduped)
+
+        # 6. 更新同步状态
+        if result.processed > 0:
+            last_message = max(messages, key=lambda m: m.sent_at)
+            await self._update_sync_status(
+                room_id,
+                last_message.sent_at,
+                last_message.platform_message_id
+            )
+
+        return result
+
+    def _make_message_hash(self, msg: UnifiedMessage) -> str:
+        """生成消息唯一哈希：发送者+时间戳+内容"""
+        content = f"{msg.sender_id}|{int(msg.sent_at.timestamp())}|{msg.content}"
+        return hashlib.sha256(content.encode()).hexdigest()
+```
+
+### 27.5 微信同步状态表
+
+```sql
+-- 微信同步状态表
+CREATE TABLE wechat_sync_status (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    room_id         UUID NOT NULL REFERENCES chat_rooms(id) ON DELETE CASCADE,
+
+    -- 同步模式
+    sync_mode       VARCHAR(50) DEFAULT 'batch',
+    -- realtime: 仅实时同步
+    -- batch: 仅批量导入
+    -- hybrid: 混合模式（实时优先，批量兜底）
+
+    -- 实时同步状态
+    realtime_status VARCHAR(50),  -- online | offline | error
+    realtime_last_heartbeat TIMESTAMPTZ,
+    realtime_error  TEXT,
+
+    -- 批量同步状态
+    last_sync_time  TIMESTAMPTZ,
+    last_message_id VARCHAR(500),
+    last_message_hash VARCHAR(64),  -- SHA256 内容哈希
+
+    -- 统计
+    total_imported  BIGINT DEFAULT 0,
+    total_skipped   BIGINT DEFAULT 0,
+    total_failed    BIGINT DEFAULT 0,
+
+    -- 时间
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW(),
+
+    UNIQUE(room_id)
+);
+
+CREATE INDEX idx_wechat_sync_room ON wechat_sync_status(room_id);
+CREATE INDEX idx_wechat_sync_mode ON wechat_sync_status(sync_mode);
+CREATE INDEX idx_wechat_sync_realtime ON wechat_sync_status(realtime_status);
+
+-- 为消息表添加内容哈希字段（用于去重）
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64);
+CREATE INDEX IF NOT EXISTS idx_messages_content_hash ON messages(room_id, content_hash);
+```
+
+### 27.6 微信同步 API
+
+```yaml
+# 微信同步管理 API
+/api/v1/wechat:
+  endpoints:
+    # 启动实时同步
+    POST /sync/start:
+      summary: 启动 Wechaty 实时同步
+      auth: admin
+      request:
+        room_ids: string[]  # 要监控的群组ID列表
+        mode: readonly | full  # 只读模式风险更低
+
+    # 停止实时同步
+    POST /sync/stop:
+      summary: 停止实时同步
+      auth: admin
+
+    # 获取同步状态
+    GET /sync/status:
+      summary: 获取同步状态
+      response:
+        realtime_status: online | offline | error
+        rooms:
+          - room_id: string
+            sync_mode: realtime | batch | hybrid
+            last_sync_time: datetime
+            total_imported: int
+
+    # 增量导入
+    POST /import/incremental:
+      summary: 增量导入微信消息
+      request:
+        content-type: multipart/form-data
+        file: binary
+        room_id: string
+        format: wechat_txt | wechat_db | json | csv
+      response:
+        job_id: string
+        total_count: int
+        new_count: int
+        skipped_count: int
+
+    # 支持的导入格式
+    GET /import/formats:
+      summary: 获取支持的导入格式
+      response:
+        formats:
+          - id: wechat_txt
+            name: 微信文本格式
+          - id: wechat_db
+            name: 微信数据库
+          - id: json
+            name: JSON格式
+          - id: csv
+            name: CSV格式
+```
+
+### 27.7 风险控制
+
+| 风险 | 等级 | 缓解措施 |
+|------|------|----------|
+| 小号封号 | 🟡 中 | 只读模式、低频拉取、使用老号、风险隔离 |
+| 实时通道断开 | 🟡 中 | 自动检测、告警通知、批量导入兜底 |
+| 消息重复导入 | 🟢 低 | 时间戳+哈希双重去重 |
+| 数据丢失 | 🟢 低 | 批量导入兜底、断点续传、状态追踪 |
+
+### 27.8 配置项
+
+```yaml
+# config.yaml
+wechat:
+  wechaty:
+    enabled: false
+    puppet: "wechaty-puppet-service"
+    token: "${WECHATY_TOKEN}"
+    mode: "readonly"  # readonly | full
+    heartbeat_interval: 300  # 5 分钟
+
+  sync:
+    default_mode: "batch"  # realtime | batch | hybrid
+    dedup_window: 86400  # 去重窗口：24小时
+    max_retry: 3
+
+  import:
+    max_file_size: 100MB
+    supported_formats:
+      - wechat_txt
+      - wechat_db
+      - json
+      - csv
+```
+
+---
+
 **END OF DOCUMENT**

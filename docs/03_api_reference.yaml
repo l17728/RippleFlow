@@ -877,6 +877,93 @@ components:
         comment: { type: string, nullable: true }
         created_at: { type: string, format: date-time }
 
+    # ── 微信同步 ─────────────────────────────────────────────────────────
+    WechatSyncStatus:
+      type: object
+      properties:
+        room_id: { type: string, format: uuid }
+        room_name: { type: string }
+        sync_mode:
+          type: string
+          enum: [realtime, batch, hybrid]
+          description: |
+            realtime: 仅实时同步
+            batch: 仅批量导入
+            hybrid: 混合模式（实时优先，批量兜底）
+        realtime_status:
+          type: string
+          enum: [online, offline, error, disabled]
+          nullable: true
+        realtime_last_heartbeat:
+          type: string
+          format: date-time
+          nullable: true
+        last_sync_time:
+          type: string
+          format: date-time
+          nullable: true
+        last_message_id: { type: string, nullable: true }
+        total_imported: { type: integer, default: 0 }
+        total_skipped: { type: integer, default: 0 }
+        total_failed: { type: integer, default: 0 }
+        updated_at: { type: string, format: date-time }
+
+    ImportJob:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        platform:
+          type: string
+          enum: [wechat, feishu, dingtalk, custom]
+        room_id: { type: string, format: uuid }
+        room_name: { type: string }
+        file_name: { type: string }
+        file_format: { type: string }
+        status:
+          type: string
+          enum: [pending, parsing, processing, completed, failed, cancelled]
+        total_count: { type: integer }
+        processed_count: { type: integer }
+        new_count: { type: integer, description: 新消息数 }
+        skipped_count: { type: integer, description: 跳过数（重复或噪声） }
+        failed_count: { type: integer }
+        time_range_start:
+          type: string
+          format: date-time
+          nullable: true
+        time_range_end:
+          type: string
+          format: date-time
+          nullable: true
+        result_summary:
+          type: object
+          properties:
+            threads_created: { type: integer }
+            threads_updated: { type: integer }
+            action_items_created: { type: integer }
+            decisions_created: { type: integer }
+            errors:
+              type: array
+              items: { type: string }
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at: { type: string, format: date-time }
+        created_by: { type: string }
+
+    ImportFormat:
+      type: object
+      properties:
+        id: { type: string, example: wechat_txt }
+        name: { type: string, example: 微信文本格式 }
+        description: { type: string, example: 微信导出的文本格式 }
+        example: { type: string }
+
     # ── 系统统计（已有）──────────────────────────────────────────────
     SystemStats:
       type: object
@@ -2758,6 +2845,279 @@ paths:
                   properties:
                     name: { type: string }
                     count: { type: integer }
+
+  # ════════════════════════════════════════════════════
+  # WECHAT SYNC
+  # ════════════════════════════════════════════════════
+
+  /api/v1/wechat/sync/start:
+    post:
+      tags: [wechat]
+      summary: 启动 Wechaty 实时同步
+      description: |
+        使用小号启动微信群消息实时同步。
+
+        **风险提示**：
+        - 微信个人号无官方API，使用第三方协议存在封号风险
+        - 建议使用只读模式（mode=readonly）降低风险
+        - 建议使用专门的同步小号，避免主号风险
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [room_ids]
+              properties:
+                room_ids:
+                  type: array
+                  items: { type: string }
+                  description: 要监控的群组ID列表
+                mode:
+                  type: string
+                  enum: [readonly, full]
+                  default: readonly
+                  description: |
+                    readonly: 只接收消息，不主动发送（推荐，风险更低）
+                    full: 可接收可发送（风险较高）
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: started }
+                  monitored_rooms: { type: integer }
+                  mode: { type: string }
+        '403':
+          description: 非管理员
+        '409':
+          description: 同步服务已运行
+
+  /api/v1/wechat/sync/stop:
+    post:
+      tags: [wechat]
+      summary: 停止实时同步
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: stopped }
+        '403':
+          description: 非管理员
+
+  /api/v1/wechat/sync/status:
+    get:
+      tags: [wechat]
+      summary: 获取同步状态
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: room_id
+          schema: { type: string }
+          description: 指定群组ID，不传则返回全部
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  realtime_status:
+                    type: string
+                    enum: [online, offline, error, disabled]
+                    description: 实时通道状态
+                  realtime_last_heartbeat:
+                    type: string
+                    format: date-time
+                    nullable: true
+                  rooms:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        room_id: { type: string }
+                        room_name: { type: string }
+                        sync_mode:
+                          type: string
+                          enum: [realtime, batch, hybrid]
+                        realtime_status: { type: string }
+                        last_sync_time:
+                          type: string
+                          format: date-time
+                          nullable: true
+                        total_imported: { type: integer }
+                        total_skipped: { type: integer }
+
+  /api/v1/wechat/import/incremental:
+    post:
+      tags: [wechat]
+      summary: 增量导入微信消息
+      description: |
+        上传微信消息文件进行增量导入。
+
+        **支持的格式**：
+        - `wechat_txt`: 微信导出的文本格式
+        - `wechat_db`: PC微信本地数据库
+        - `json`: 通用JSON格式
+        - `csv`: 通用CSV格式
+
+        **增量机制**：
+        - 根据最后同步时间过滤，只导入新消息
+        - 通过发送者+时间+内容哈希去重
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, room_id, format]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 导入文件
+                room_id:
+                  type: string
+                  description: 目标群组ID
+                format:
+                  type: string
+                  enum: [wechat_txt, wechat_db, json, csv]
+                  description: 文件格式
+                options:
+                  type: object
+                  properties:
+                    skip_noise:
+                      type: boolean
+                      default: true
+                    reprocess:
+                      type: boolean
+                      default: false
+                      description: 是否重新处理已存在的消息
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id: { type: string, format: uuid }
+                  status: { type: string }
+                  total_count: { type: integer }
+                  new_count: { type: integer, description: 新消息数 }
+                  skipped_count: { type: integer, description: 跳过数（重复或噪声） }
+                  failed_count: { type: integer }
+        '400':
+          description: 不支持的格式或无效参数
+        '403':
+          description: 非当事人或管理员
+
+  /api/v1/wechat/import/formats:
+    get:
+      tags: [wechat]
+      summary: 获取支持的导入格式
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  formats:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        description: { type: string }
+                        example:
+                          type: string
+                          description: 格式示例
+
+  /api/v1/wechat/import/jobs:
+    get:
+      tags: [wechat]
+      summary: 列出导入任务
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [pending, processing, completed, failed, all]
+          default: all
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ImportJob'
+
+  /api/v1/wechat/import/jobs/{job_id}:
+    get:
+      tags: [wechat]
+      summary: 查询导入任务状态
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportJob'
+        '404':
+          description: 任务不存在
+
+    delete:
+      tags: [wechat]
+      summary: 取消导入任务
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: cancelled }
+        '404':
+          description: 任务不存在
+        '409':
+          description: 任务已完成，无法取消
 
 security:
   - cookieAuth: []
