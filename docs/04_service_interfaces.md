@@ -560,9 +560,11 @@ class ISensitiveService(Protocol):
 
     async def send_daily_reminders(self) -> dict[str, int]:
         """
-        Celery Beat 定时任务调用。
+        发送敏感授权每日提醒。
         按提醒节奏（1/3/7/14/30 天，之后每 30 天）发送提醒。
         返回 {notified_users: N, total_pending: M}。
+
+        注：由 nullclaw cron 定时调度，不再使用 Celery Beat。
         """
         ...
 ```
@@ -1148,6 +1150,8 @@ class IAIButlerService(Protocol):
     """
     AI 管家服务。
     负责主动运营知识库，包括快报生成、提醒推送、健康监控等。
+
+    注：定时调度由 nullclaw cron 负责，此服务提供 CLI 命令供 nullclaw 调用。
     """
 
     async def generate_weekly_digest(
