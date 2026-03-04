@@ -315,9 +315,10 @@ PUT /api/v1/threads/{id}/summary
 ```
 Stage 0 检测到敏感内容
         │
+        ├── 确定 sensitivity_level（L1/L2/L3，LLM 判定）
         ├── 创建 sensitive_authorizations 记录
         ├── decisions = {每位当事人: "pending"}
-        ├── escalation_after = 7 days  ← 新增
+        ├── escalation_after = L1:3天 / L2:5天 / L3:7天
         └── 异步推送 App 内通知给每位当事人
                   │
               当事人操作
@@ -327,12 +328,12 @@ Stage 0 检测到敏感内容
          │        │        │
          ▼        ▼        ▼
     立即拒绝   更新decisions  保存脱敏版本
-    永不处理   检查是否全部授权  待全部确认
-                  │
-              全部明确授权
-                  │
-                  ▼
-        消息重入处理队列（Stage 1）
+    永不处理   检查授权阈值    L1可立即入库
+              │
+        达到授权阈值（L1≥1人 / L2>50% / L3全员）
+              │
+              ▼
+    消息重入处理队列（Stage 1）
 
 
 ┌─────────────────────────────────────────────────────────────────┐
@@ -342,9 +343,11 @@ Stage 0 检测到敏感内容
 │        AND overall_status = 'pending'                           │
 │                                                                 │
 │  动作：                                                         │
-│  1. 通知管理员：「以下敏感授权已超过 7 天未处理，请介入」          │
+│  1. 通知管理员：「以下敏感授权已超过 L1:3/L2:5/L3:7 天，请介入」 │
 │  2. 通知当事人：「授权请求即将升级至管理员处理」                   │
 │  3. 记录 escalated_at、escalated_to                             │
+│                                                                 │
+│  详细分级策略见 §38 敏感授权分级机制                              │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -7634,6 +7637,80 @@ L3 冷数据（2年以上）
 `messages` 表新增：
 - `archive_status`：`active` | `archived`
 - `content_archived`：BOOLEAN，内容是否已从 DB 删除（归档到 L3 后）
+
+---
+
+## 38. 敏感授权分级机制（P1-3）
+
+### 38.1 当前机制问题
+
+原设计采用"全员授权 + 7天升级管理员"的统一策略，对所有敏感内容一视同仁。评审发现以下问题：
+
+1. **7天周期过长**：创业团队节奏快，当事人可能忘记讨论上下文
+2. **一票否决过严**：误操作拒绝导致重要信息永久丢失
+3. **缺乏分级**：轻微敏感（薪资范围讨论）与高度敏感（离职谈判）处理相同
+
+### 38.2 三级敏感策略
+
+| 级别 | 典型内容 | 授权阈值 | 升级时间 | 默认处理 |
+|------|----------|----------|----------|----------|
+| **L1 轻微敏感** | 薪资范围讨论、一般绩效反馈 | 任一当事人授权（≥1人） | 3 天 | 脱敏后入库 |
+| **L2 中等敏感** | 具体薪资数字、晋升决策 | > 50% 当事人授权 | 5 天 | 等待授权 |
+| **L3 高度敏感** | 离职谈判、纪律处分、法律纠纷 | 全部当事人授权 | 7 天 | 严格等待，永不自动处理 |
+
+### 38.3 级别判定（Stage 0 扩展）
+
+Stage 0 敏感检测在确认敏感后，同时输出 `sensitivity_level`：
+
+```
+Stage 0 LLM 输出（扩展）：
+{
+  "is_sensitive": true,
+  "sensitive_types": ["hr", "privacy"],
+  "sensitivity_level": "L2",
+  "sensitive_summary": "涉及具体薪资数字和晋升决策",
+  "stakeholder_ids": ["zhangsan", "lisi"]
+}
+```
+
+判定规则（LLM 依据此规则给出建议，管理员可覆盖）：
+- 含具体人员姓名 + 薪资/绩效数字 → L2
+- 含法律术语/离职/仲裁/纠纷 → L3
+- 仅含薪资范围/级别讨论（无具体数字）→ L1
+
+### 38.4 授权通过条件
+
+```python
+def check_authorization_threshold(decisions: dict, threshold: float) -> bool:
+    total = len(decisions)
+    authorized = sum(1 for d in decisions.values() if d["status"] == "authorize")
+    if threshold == 0.0:      # L1：任一授权
+        return authorized >= 1
+    elif threshold == 0.5:    # L2：多数授权
+        return authorized / total > 0.5
+    else:                     # L3：全员授权（threshold=1.0）
+        return authorized == total
+```
+
+### 38.5 L1 智能脱敏示例
+
+L1 级别，任一当事人授权后，平台自动脱敏入库：
+
+```
+原文：「李四这次绩效 C，工资调整 -10%，请注意沟通方式」
+脱敏：「某员工本次绩效评级较低，薪资有所调整，提醒关注沟通方式」
+保留价值：团队了解"近期有绩效调整"，不暴露具体人员和数字
+```
+
+### 38.6 DDL 变更
+
+`sensitive_authorizations` 表新增字段（见 §数据库 DDL P1-3 补充）：
+- `sensitivity_level VARCHAR(10)`：L1/L2/L3
+- `auth_threshold REAL`：授权通过阈值（0.0/0.5/1.0）
+
+`escalation_after` 字段含义变化：
+- 原固定 7 天 → 由 sensitivity_level 决定（L1=3天, L2=5天, L3=7天）
+- Stage 0 写入时自动设置对应值
 
 ---
 

@@ -901,3 +901,14 @@ CREATE INDEX idx_failed_messages_message ON failed_messages (message_id);
 -- messages 目标新增列：
 --   archive_status   TEXT NOT NULL DEFAULT 'active' CHECK (archive_status IN ('active','archived'))
 --   content_archived INTEGER NOT NULL DEFAULT 0  -- SQLite 无 BOOLEAN，用 0/1
+
+-- =============================================================
+-- 敏感授权分级机制（P1-3）
+-- =============================================================
+
+-- SQLite: sensitive_authorizations 新增分级字段（通过迁移脚本处理）
+-- 目标列定义：
+--   sensitivity_level TEXT NOT NULL DEFAULT 'L3'
+--       CHECK (sensitivity_level IN ('L1', 'L2', 'L3'))
+--   auth_threshold    REAL NOT NULL DEFAULT 1.0
+--       -- L1=0.0（任一授权即可）, L2=0.5（>50%）, L3=1.0（全员）

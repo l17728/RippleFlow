@@ -2183,3 +2183,19 @@ CREATE INDEX idx_messages_archive ON messages (archive_status)
 
 COMMENT ON COLUMN topic_threads.archive_status IS 'L1=active，L2=archived_l2，L3=archived_l3';
 COMMENT ON COLUMN messages.content_archived IS 'TRUE表示消息正文已移至对象存储，DB仅保留元数据';
+
+-- =============================================================
+-- 敏感授权分级机制（P1-3）
+-- =============================================================
+
+-- 为 sensitive_authorizations 添加敏感级别字段
+ALTER TABLE sensitive_authorizations
+    ADD COLUMN sensitivity_level VARCHAR(10) NOT NULL DEFAULT 'L3'
+        CHECK (sensitivity_level IN ('L1', 'L2', 'L3')),
+    ADD COLUMN auth_threshold    REAL NOT NULL DEFAULT 1.0;
+    -- L1=0.0（任一授权即可）, L2=0.5（>50%）, L3=1.0（全员）
+
+COMMENT ON COLUMN sensitive_authorizations.sensitivity_level IS
+    'L1轻微（任一授权+脱敏入库）/ L2中等（>50%授权）/ L3高度（全员授权）';
+COMMENT ON COLUMN sensitive_authorizations.auth_threshold IS
+    '授权通过阈值：0.0=任一, 0.5=多数, 1.0=全员';
