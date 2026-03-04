@@ -912,3 +912,201 @@ CREATE INDEX idx_failed_messages_message ON failed_messages (message_id);
 --       CHECK (sensitivity_level IN ('L1', 'L2', 'L3'))
 --   auth_threshold    REAL NOT NULL DEFAULT 1.0
 --       -- L1=0.0（任一授权即可）, L2=0.5（>50%）, L3=1.0（全员）
+
+
+-- =============================================================
+-- 用户在线状态（需求2+4）
+-- =============================================================
+
+CREATE TABLE user_presence (
+    user_id        TEXT PRIMARY KEY,
+    status         TEXT NOT NULL DEFAULT 'offline'
+                   CHECK (status IN ('online','idle','offline')),
+    last_heartbeat TEXT,
+    client_info    TEXT NOT NULL DEFAULT '{}',
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- =============================================================
+-- 离线消息队列（需求2）
+-- =============================================================
+
+CREATE TABLE queued_notifications (
+    id           TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL,
+    event_type   TEXT NOT NULL,
+    payload      TEXT NOT NULL DEFAULT '{}',
+    priority     INTEGER NOT NULL DEFAULT 5,
+    expires_at   TEXT,
+    delivered_at TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_queued_notif_user ON queued_notifications (user_id, priority)
+    WHERE delivered_at IS NULL;
+
+-- =============================================================
+-- 软能力扩展定义（需求1A）
+-- =============================================================
+
+CREATE TABLE extension_definitions (
+    id           TEXT PRIMARY KEY,
+    ext_type     TEXT NOT NULL CHECK (ext_type IN ('category','task_type','label')),
+    ext_key      TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    description  TEXT,
+    parent_key   TEXT,
+    risk_level   TEXT NOT NULL DEFAULT 'low' CHECK (risk_level IN ('low','high')),
+    status       TEXT NOT NULL DEFAULT 'pending'
+                 CHECK (status IN ('pending','active','disabled')),
+    proposed_by  TEXT NOT NULL DEFAULT 'nullclaw',
+    approved_by  TEXT,
+    approved_at  TEXT,
+    config       TEXT NOT NULL DEFAULT '{}',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- =============================================================
+-- 硬能力扩展注册表（需求1B）
+-- =============================================================
+
+CREATE TABLE extension_registry (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL UNIQUE,
+    ext_track    TEXT NOT NULL CHECK (ext_track IN ('event_hook','nullclaw_script')),
+    hook_events  TEXT NOT NULL DEFAULT '[]',
+    webhook_url  TEXT,
+    script_path  TEXT,
+    version      TEXT NOT NULL DEFAULT '1.0.0',
+    status       TEXT NOT NULL DEFAULT 'pending'
+                 CHECK (status IN ('pending','active','disabled')),
+    approved_by  TEXT,
+    config       TEXT NOT NULL DEFAULT '{}',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE extension_invocation_logs (
+    id              TEXT PRIMARY KEY,
+    extension_id    TEXT NOT NULL REFERENCES extension_registry(id) ON DELETE CASCADE,
+    hook_event      TEXT,
+    input_payload   TEXT NOT NULL DEFAULT '{}',
+    output_payload  TEXT NOT NULL DEFAULT '{}',
+    status          TEXT NOT NULL CHECK (status IN ('success','failed','timeout')),
+    duration_ms     INTEGER,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- =============================================================
+-- 工作流模板与实例（需求3）
+-- =============================================================
+
+CREATE TABLE workflow_templates (
+    id              TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    trigger_pattern TEXT,
+    trigger_regex   TEXT,
+    steps           TEXT NOT NULL DEFAULT '[]',
+    learned_from    TEXT NOT NULL DEFAULT '[]',
+    style_notes     TEXT,
+    trust_level     TEXT NOT NULL DEFAULT 'supervised'
+                    CHECK (trust_level IN ('supervised','autonomous')),
+    trust_score     REAL NOT NULL DEFAULT 0
+                    CHECK (trust_score BETWEEN 0 AND 1),
+    used_count      INTEGER NOT NULL DEFAULT 0,
+    success_count   INTEGER NOT NULL DEFAULT 0,
+    created_by      TEXT NOT NULL DEFAULT 'nullclaw',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE workflow_instances (
+    id                  TEXT PRIMARY KEY,
+    template_id         TEXT REFERENCES workflow_templates(id) ON DELETE SET NULL,
+    trigger_thread_id   TEXT REFERENCES topic_threads(id) ON DELETE SET NULL,
+    trigger_message_id  TEXT REFERENCES messages(id) ON DELETE SET NULL,
+    status              TEXT NOT NULL DEFAULT 'pending_approval'
+                        CHECK (status IN ('pending_approval','running','completed','cancelled','failed')),
+    approved_by         TEXT,
+    approval_expires_at TEXT,
+    context             TEXT NOT NULL DEFAULT '{}',
+    execution_log       TEXT NOT NULL DEFAULT '[]',
+    cancelled_reason    TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at        TEXT
+);
+
+CREATE INDEX idx_wf_instance_status ON workflow_instances (status, created_at DESC);
+
+CREATE TABLE task_delegates (
+    id               TEXT PRIMARY KEY,
+    source_thread_id TEXT REFERENCES topic_threads(id) ON DELETE SET NULL,
+    target_user_id   TEXT NOT NULL,
+    target_group_id  TEXT,
+    task_description TEXT NOT NULL,
+    delegated_by     TEXT NOT NULL DEFAULT 'nullclaw',
+    status           TEXT NOT NULL DEFAULT 'pending'
+                     CHECK (status IN ('pending','accepted','rejected','completed')),
+    due_at           TEXT,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- =============================================================
+-- 检索记录与召回率自省（需求7）
+-- =============================================================
+
+CREATE TABLE search_logs (
+    id           TEXT PRIMARY KEY,
+    query        TEXT NOT NULL,
+    query_type   TEXT NOT NULL
+                 CHECK (query_type IN ('fts','kg_traverse','qa','faq','combined')),
+    result_ids   TEXT NOT NULL DEFAULT '[]',
+    result_count INTEGER NOT NULL DEFAULT 0,
+    user_id      TEXT,
+    group_id     TEXT,
+    latency_ms   INTEGER,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE recall_evaluations (
+    id                TEXT PRIMARY KEY,
+    evaluated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    query_sample      TEXT NOT NULL,
+    index_results     TEXT NOT NULL DEFAULT '[]',
+    fullscan_results  TEXT NOT NULL DEFAULT '[]',
+    recall_rate       REAL,
+    precision_rate    REAL,
+    improvement_notes TEXT
+);
+
+-- =============================================================
+-- 跟踪项自定义属性（需求8）
+-- =============================================================
+
+CREATE TABLE custom_field_definitions (
+    id           TEXT PRIMARY KEY,
+    entity_type  TEXT NOT NULL CHECK (entity_type IN ('thread','todo','faq_item','workflow')),
+    group_id     TEXT,
+    field_key    TEXT NOT NULL,
+    field_name   TEXT NOT NULL,
+    field_type   TEXT NOT NULL CHECK (field_type IN ('text','number','date','select','boolean')),
+    options      TEXT NOT NULL DEFAULT '[]',
+    suggested_by TEXT,
+    adopted_by   TEXT,
+    adopted_at   TEXT,
+    usage_count  INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (entity_type, group_id, field_key)
+);
+
+CREATE TABLE custom_field_values (
+    entity_type TEXT NOT NULL,
+    entity_id   TEXT NOT NULL,
+    field_id    TEXT NOT NULL REFERENCES custom_field_definitions(id) ON DELETE CASCADE,
+    value       TEXT,
+    set_by      TEXT,
+    set_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (entity_type, entity_id, field_id)
+);
+
+-- butler_proposals PRD 字段（SQLite 通过迁移脚本处理）
+-- 目标新增列：prd_content TEXT, prd_format TEXT DEFAULT 'rippleflow_prd_v1', notify_devs INTEGER DEFAULT 1
