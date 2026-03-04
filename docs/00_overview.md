@@ -327,9 +327,9 @@ butler_experience_memory:
           ┌────────────────┼────────────────────┐
           ▼                ▼                    ▼
 ┌─────────────────────┐  ┌──────────────────┐  ┌──────────────────────┐
-│  Service Layer      │  │  内存缓存/Redis  │  │  LLM API             │
+│  Service Layer      │  │  缓存层          │  │  LLM API             │
 │                     │  │                  │  │                      │
-│  MessageService     │  │  - Celery 队列    │  │  (公司内部部署)       │
+│  MessageService     │  │  - 任务队列      │  │  (公司内部部署)       │
 │  ThreadService      │  │  - 会话 Token     │  │                      │
 │  SearchService      │  │  - 搜索缓存       │  │                      │
 │  SensitiveService   │  │  - 管家经验库     │  │                      │
@@ -353,11 +353,11 @@ butler_experience_memory:
            │
            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  Celery Workers (独立进程)                                            │
+│  Celery Workers (独立进程)                                        │
 │  ProcessingPipeline / SummaryUpdateWorker / NotificationWorker       │
-│  ReminderScheduler / SyncToChatWorker / EscalationWorker             │
-│  ButlerScheduler / WeeklyDigestWorker / ActionItemReminderWorker     │
-│  ← 新增管家相关 Worker                                                │
+│  SyncToChatWorker / EscalationWorker                                 │
+│                                                                     │
+│  注：定时任务（快报/提醒）由 nullclaw cron 调度                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 

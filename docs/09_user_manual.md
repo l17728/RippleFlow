@@ -638,12 +638,12 @@ flowchart LR
 
 ```mermaid
 sequenceDiagram
-    participant B as Celery Beat
+    participant B as nullclaw cron
     participant A as AIButlerService
     participant T as 待办列表
     participant C as ChatToolService
     participant U as 用户
-    
+
     B->>A: 每日 9:00 触发
     A->>T: 查询明天到期的待办
     A->>C: 发送提醒消息
@@ -738,13 +738,13 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant B as Celery Beat
+    participant B as nullclaw cron
     participant A as AIButlerService
     participant T as 统计数据
     participant L as LLM
     participant C as ChatToolService
     participant G as 主群
-    
+
     B->>A: 每周一 9:00 触发
     A->>T: 统计上周数据
     T-->>A: 返回统计结果

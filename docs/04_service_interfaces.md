@@ -1283,6 +1283,29 @@ class IAIButlerService(Protocol):
         执行管家任务。
         """
         ...
+
+    async def notify_nullclaw(
+        self,
+        event_type: str,
+        payload: dict,
+    ) -> bool:
+        """
+        推送事件到 nullclaw。
+        RippleFlow 平台在业务操作完成后，通过此方法推送事件到 nullclaw。
+        返回推送是否成功。
+
+        支持的事件类型：
+        - message.received: 新消息入库
+        - thread.created: 新话题线索创建
+        - thread.updated: 话题线索更新
+        - todo.created: 待办创建
+        - todo.completed: 待办完成
+        - sensitive.detected: 敏感内容检测
+        - sensitive.authorized: 敏感授权完成
+        - user.query: 用户发起问答
+        - user.feedback: 用户提交反馈
+        """
+        ...
 ```
 
 ---
@@ -1617,7 +1640,7 @@ class IPersonalTodoService(Protocol):
         ...
 
     async def check_reminders(self) -> list[dict]:
-        """检查需要提醒的待办。由 Celery Worker 定时调用。"""
+        """检查需要提醒的待办。由 nullclaw cron 定时调用。"""
         ...
 
     async def sync_from_action_item(

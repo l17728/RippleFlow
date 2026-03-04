@@ -771,6 +771,229 @@ extensions:
 
 ---
 
+## 8.1 nullclaw Memory 三层架构
+
+nullclaw 提供三层记忆系统，支持管家的长期记忆和知识沉淀：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    nullclaw Memory 三层架构                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  L1 活跃层 (.rippleflow/memory/)                                │
+│  ─────────────────────────────                                  │
+│  • 最近 7 天的对话和事件                                         │
+│  • 自动加载到上下文                                             │
+│  • 每日自动归档                                                 │
+│                                                                 │
+│  L2 归档层 (.rippleflow/archive/)                               │
+│  ─────────────────────────────                                  │
+│  • 压缩后的历史摘要                                             │
+│  • LLM 自动生成摘要                                             │
+│  • 保留原始内容（可追溯）                                        │
+│                                                                 │
+│  L3 核心层 (.rippleflow/MEMORY.md)                              │
+│  ─────────────────────────────                                  │
+│  • 永久保留的核心知识                                            │
+│  • 人工审核后才会更新                                           │
+│  • 最大 20000 字符                                              │
+│                                                                 │
+│  nullclaw 自动处理：                                            │
+│  • compaction: 每日 2:00 自动压缩                               │
+│  • hygiene: 每周日 3:00 清理过期内容                            │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**配置示例**：
+
+```json
+{
+  "memory": {
+    "backend": "markdown",
+    "workspace_dir": ".rippleflow",
+    "layers": {
+      "L1_active": {
+        "path": "memory/",
+        "max_age_days": 7,
+        "auto_archive": true
+      },
+      "L2_archive": {
+        "path": "archive/",
+        "max_age_days": 90,
+        "keep_original": true
+      },
+      "L3_core": {
+        "path": "MEMORY.md",
+        "max_size": 20000,
+        "require_review": true
+      }
+    },
+    "compaction": {
+      "schedule": "0 2 * * *",
+      "target_layer": "L2"
+    },
+    "hygiene": {
+      "schedule": "0 3 * * 0",
+      "remove_duplicates": true
+    }
+  }
+}
+```
+
+---
+
+## 8.2 多 Agent 协作架构
+
+nullclaw 支持多 Agent 协作，RippleFlow 可配置多个专家 Agent：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    多 Agent 协作架构                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  rippleflow_butler（主管家）                                     │
+│  ─────────────────────────                                      │
+│  • 协调其他 Agent                                               │
+│  • 日常运营任务                                                 │
+│  • 用户交互入口                                                 │
+│                                                                 │
+│  rippleflow_qa（问答专家）                                      │
+│  ─────────────────────────                                      │
+│  • 处理复杂问答请求                                             │
+│  • 知识检索优化                                                 │
+│  • FAQ 维护                                                    │
+│                                                                 │
+│  rippleflow_analyst（分析专家）                                 │
+│  ─────────────────────────                                      │
+│  • 数据分析与报告生成                                           │
+│  • 趋势发现                                                    │
+│  • 统计报表                                                    │
+│                                                                 │
+│  rippleflow_coordinator（协调专家）                             │
+│  ─────────────────────────                                      │
+│  • 任务分配与跟踪                                               │
+│  • 资源协调                                                    │
+│  • 待办提醒                                                    │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Agent 配置示例**：
+
+```json
+{
+  "agents": [
+    {
+      "id": "rippleflow_butler",
+      "name": "主管家",
+      "role": "coordinator",
+      "model": "claude-sonnet-4-6",
+      "tools": ["shell_execute", "http_request"],
+      "delegates_to": ["rippleflow_qa", "rippleflow_analyst", "rippleflow_coordinator"]
+    },
+    {
+      "id": "rippleflow_qa",
+      "name": "问答专家",
+      "role": "specialist",
+      "model": "claude-sonnet-4-6",
+      "tools": ["shell_execute"],
+      "expertise": ["qa", "search", "knowledge"]
+    },
+    {
+      "id": "rippleflow_analyst",
+      "name": "分析专家",
+      "role": "specialist",
+      "model": "claude-sonnet-4-6",
+      "tools": ["shell_execute", "file_write"],
+      "expertise": ["analytics", "reports", "trends"]
+    },
+    {
+      "id": "rippleflow_coordinator",
+      "name": "协调专家",
+      "role": "specialist",
+      "model": "claude-sonnet-4-6",
+      "tools": ["shell_execute", "http_request"],
+      "expertise": ["tasks", "todos", "reminders"]
+    }
+  ]
+}
+```
+
+---
+
+## 8.3 Autonomy 自主控制模块
+
+nullclaw 提供自主控制机制，定义管家的自主行为边界：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    nullclaw Autonomy 自主控制                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  自主等级（level: 0-3）                                          │
+│  ─────────────────────                                          │
+│  • Level 0: 完全被动，只响应明确请求                              │
+│  • Level 1: 可执行低风险操作（L1 权限）                           │
+│  • Level 2: 可执行中等风险操作（L2 权限）                         │
+│  • Level 3: 可自主决策大部分操作                                  │
+│                                                                 │
+│  成本控制                                                        │
+│  ────────                                                       │
+│  • max_cost_per_day: 每日最大成本                                │
+│  • max_tokens_per_request: 单次最大 token                       │
+│  • alert_threshold: 超过阈值告警                                 │
+│                                                                 │
+│  确认要求                                                        │
+│  ────────                                                       │
+│  • 指定哪些操作需要人工确认                                       │
+│  • sensitive_escalate: 敏感授权升级                              │
+│  • routine_create_l2: 创建 L2 级 Routine                        │
+│  • proposal_submit: 提交新命令提案                               │
+│                                                                 │
+│  自省策略                                                        │
+│  ────────                                                       │
+│  • auto_apply: 是否自动应用优化                                  │
+│  • require_human_review: 是否需要人工审核                        │
+│  • audit_all_changes: 是否审计所有变更                           │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**配置示例**：
+
+```json
+{
+  "autonomy": {
+    "level": 2,
+
+    "cost_control": {
+      "max_cost_per_day": 10.0,
+      "max_tokens_per_request": 4096,
+      "alert_threshold": 0.8,
+      "currency": "CNY"
+    },
+
+    "require_confirmation": [
+      "sensitive_escalate",
+      "routine_create_l2",
+      "proposal_submit",
+      "memory_modify_l3"
+    ],
+
+    "reflection_policy": {
+      "auto_apply_l1": true,
+      "auto_apply_l2": false,
+      "require_human_review": true,
+      "audit_all_changes": true,
+      "max_auto_changes_per_day": 5
+    }
+  }
+}
+```
+
+---
+
 ## 9. 数据库设计
 
 详见 `02_database_ddl.sql` (PostgreSQL) 或 `02b_database_ddl_sqlite.sql` (SQLite)，关键表：

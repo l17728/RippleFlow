@@ -50,6 +50,8 @@ tags:
     description: 用户贡献统计
   - name: butler
     description: AI 管家服务
+  - name: internal
+    description: 内部服务接口（不对外暴露）
 
 # ─────────────────────────────────────────────────────────────────────
 # COMPONENTS
@@ -3865,3 +3867,74 @@ security:
                     properties:
                       L1_candidates: { type: integer }
                       L2_candidates: { type: integer }
+
+# ─────────────────────────────────────────────────────────────────────
+# 内部接口（RippleFlow → nullclaw）
+# ─────────────────────────────────────────────────────────────────────
+
+  /internal/events/publish:
+    post:
+      tags: [internal]
+      summary: 发布事件到 nullclaw
+      description: |
+        RippleFlow 平台在业务操作完成后，通过此接口推送事件到 nullclaw。
+        此接口仅供内部服务调用，不对外暴露。
+
+        **事件类型**：
+        - `message.received`: 新消息入库
+        - `thread.created`: 新话题线索创建
+        - `thread.updated`: 话题线索更新
+        - `todo.created`: 待办创建
+        - `todo.completed`: 待办完成
+        - `sensitive.detected`: 敏感内容检测
+        - `sensitive.authorized`: 敏感授权完成
+        - `user.query`: 用户发起问答
+        - `user.feedback`: 用户提交反馈
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event, payload]
+              properties:
+                event:
+                  type: string
+                  enum:
+                    - message.received
+                    - thread.created
+                    - thread.updated
+                    - todo.created
+                    - todo.completed
+                    - sensitive.detected
+                    - sensitive.authorized
+                    - user.query
+                    - user.feedback
+                  example: thread.created
+                timestamp:
+                  type: string
+                  format: date-time
+                  example: "2026-03-04T10:30:00Z"
+                payload:
+                  type: object
+                  description: 事件相关数据
+                  example:
+                    thread_id: "550e8400-e29b-41d4-a716-446655440000"
+                    title: "Redis 集群部署方案讨论"
+                    room_id: "tech-discussion"
+                    created_by: "zhangsan"
+      responses:
+        '200':
+          description: 事件推送成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, example: true }
+                  message: { type: string, example: "Event published to nullclaw" }
+        '400':
+          description: 无效的事件类型或载荷
+        '503':
+          description: nullclaw 服务不可用
