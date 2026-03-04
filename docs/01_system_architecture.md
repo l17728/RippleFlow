@@ -177,8 +177,8 @@ SQLite (初期) ──→ 系统压力增大 ──→ PostgreSQL (升级)
 ┌─────────────────────────────────────────────────────────────────────┐
 │  Celery Workers (独立进程)                                        │
 │                                                                   │
-│  ProcessingPipeline      消息 6 阶段处理（Stage 0–5）              │
-│  SummaryUpdateWorker     增量摘要更新                              │
+│  ProcessingPipeline      消息 5 阶段处理（Stage 0–4）              │
+│  SummaryUpdateWorker     ❌ 已移除（摘要更新移交 nullclaw）         │
 │  NotificationWorker      App 内通知推送                            │
 │  SyncToChatWorker        修改结果同步至聊天群（用户确认后）          │
 │  EscalationWorker        敏感授权超时升级                           │
@@ -239,16 +239,26 @@ Webhook 接收消息
                                │
                                ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  Stage 5: 增量摘要更新                                           │
+│  Stage 5: 完成，发出事件通知                                     │
 │                                                                 │
-│  输入：现有摘要 + 新消息                                          │
-│  LLM 输出：更新摘要 + 状态变化 + 是否漂移                         │
-│  旧摘要存 thread_summary_history                                │
-│  漂移检测：追加说明（Append-Only），通知原决策当事人              │
+│  流水线 Stage 0–4 完成后存储，标记可检索                          │
+│  HTTP POST 事件推送至 nullclaw：                                  │
+│  { thread_id, category, new_message_ids[], is_new_thread }      │
 └──────────────────────────────┬──────────────────────────────────┘
                                │
                                ▼
-                      存储完成，可检索
+┌─────────────────────────────────────────────────────────────────┐
+│  nullclaw 接收事件 → 执行增量摘要更新（策略层）                    │
+│                                                                 │
+│  LLM 输入：现有摘要 + 新消息内容 + 类别                           │
+│  LLM 输出：更新摘要 + 状态变化 + 是否漂移                         │
+│  调用 PUT /api/v1/threads/{id}/summary 写回                     │
+│  漂移时：追加冲突说明，通知原决策当事人                            │
+│  旧摘要归档到 thread_summary_history                             │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │
+                               ▼
+                      摘要更新完成，可检索
 ```
 
 ---
@@ -728,7 +738,7 @@ butler_prompts/
 | Stage 2 分类 | glm-4-air | ✅ 一级 | 分类精度重要 |
 | Stage 3 话题匹配 | glm-4-air | ✅ 一级 | 语义理解 |
 | Stage 4 结构化提取 | glm-4-air | ✅ 一级 | 结构化提取 |
-| Stage 5 摘要更新 | glm-4-plus | ✅ 一级 | 影响问答质量 |
+| Stage 5 摘要更新 | glm-4-plus | — | **由 nullclaw 执行，不在平台流水线** |
 | 问答关键词提取 | glm-4-flash | ✅ 全链路 | 简单任务 |
 | 问答答案综合 | glm-4-plus | ✅ 一级 | 核心体验 |
 | 会议纪要生成 | glm-4-air | ✅ 一级 | 按需生成 |
@@ -2685,6 +2695,7 @@ COMMENT ON TABLE knowledge_edges IS '知识图谱边：显式建模(固定字段
 │                                                                 │
 │  Stage 4: 结构化提取（固定字段：决策/责任人/错误信息等）         │
 │  Stage 5: 增量摘要更新                                           │
+│  ⚠️ 已移交 nullclaw，不在平台流水线内执行                          │
 │                ↓                                                │
 │  流水线完成后 → HTTP POST 事件推送至 nullclaw                    │
 │  事件载荷：{ thread_id, category, summary, messages[] }         │

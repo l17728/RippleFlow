@@ -236,7 +236,8 @@ class IProcessingPipelineService(Protocol):
 
     async def run(self, message_id: UUID) -> str:
         """
-        执行完整的 6 阶段流水线。
+        执行 Stage 0–4 共 5 阶段流水线（Stage 5 摘要更新已移交 nullclaw）。
+        完成后向 nullclaw 发送事件通知（HTTP POST）。
         返回最终状态字符串：
           'skipped_noise' | 'sensitive_pending' | 'classified' | 'failed'
         """
@@ -296,6 +297,8 @@ class IProcessingPipelineService(Protocol):
         new_message_id: UUID,
     ) -> SummaryUpdateResult:
         """
+        ⚠️ 已移交 nullclaw 执行，此接口不再由平台流水线调用。
+        保留定义供 nullclaw 通过 PUT /api/v1/threads/{id}/summary 写回结果时使用。
         阶段 5：增量摘要更新。
         输入：现有摘要 + 新消息内容。
         旧摘要自动归档到 thread_summary_history。
@@ -838,7 +841,11 @@ class ILLMService(Protocol):
         new_messages: list[dict],
         category: str,
     ) -> SummaryUpdateResult:
-        """Prompt: Stage 5 增量摘要更新"""
+        """
+        ⚠️ 已移交 nullclaw 执行。
+        此 Prompt 由 nullclaw 侧调用 LLM，不在平台 ILLMService 中执行。
+        Prompt 模板见 06_llm_prompt_templates.md §7。
+        """
         ...
 
     async def extract_search_keywords(

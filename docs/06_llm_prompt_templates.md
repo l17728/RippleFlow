@@ -25,7 +25,7 @@ MODEL_REQUIREMENTS = {
     "stage2_classify":     "glm-4-air",    # 分类精度重要，允许一级降级
     "stage3_match_thread": "glm-4-air",    # 语义理解，允许一级降级
     "stage4_extract":      "glm-4-air",    # 结构化提取，允许一级降级
-    "stage5_summary":      "glm-4-plus",   # 摘要质量直接影响问答，优先高质量
+    "stage5_summary":      "glm-4-plus",   # 摘要更新由 nullclaw 执行，模型要求同此
     "qa_keywords":         "glm-4-flash",  # 简单关键词提取
     "qa_synthesize":       "glm-4-plus",   # 问答质量是核心体验
     "meeting_notes":       "glm-4-air",    # 纪要按需生成，允许一级降级
@@ -612,8 +612,12 @@ def parse_extract_result(raw: str) -> dict:
 
 ## 7. Stage 5：增量摘要更新
 
-**对应接口**：`ILLMService.update_summary`
-**触发时机**：Stage 4 后（或独立的 SummaryUpdateWorker 定时执行）
+> **执行主体**：此 Prompt 由 **nullclaw** 执行，不在 RippleFlow 平台流水线内调用。
+> nullclaw 收到 `thread_processed` 事件后，查询话题最新消息，调用 LLM 生成新摘要，
+> 再通过 `PUT /api/v1/threads/{id}/summary` 写回平台。
+
+**对应接口**：nullclaw 侧 LLM 调用（非平台 `ILLMService`）
+**触发时机**：RippleFlow Stage 0–4 完成后，事件推送触发 nullclaw
 
 ### 7.1 System Prompt
 
