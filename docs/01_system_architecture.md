@@ -2675,19 +2675,32 @@ COMMENT ON TABLE knowledge_edges IS '知识图谱边：显式建模(固定字段
 | **容错性** | 提取失败不影响主流程 |
 | **辅助索引** | 作为线索查询的辅助手段 |
 
-### 19.6 图谱构建流程（尽力而为）
+### 19.6 图谱构建流程（nullclaw 主导，尽力而为）
+
+知识图谱构建是**策略行为**，完全由 nullclaw 管家实施。RippleFlow 平台仅提供图谱写入 API，不执行任何实体/关系提取逻辑。
 
 ```
-消息处理时，尝试提取知识：
-
 ┌─────────────────────────────────────────────────────────────────┐
-│  Stage 4 结构化提取（主流程不变）                                 │
+│  RippleFlow 消息处理流水线（机制层，不含图谱逻辑）               │
 │                                                                 │
+│  Stage 4: 结构化提取（固定字段：决策/责任人/错误信息等）         │
+│  Stage 5: 增量摘要更新                                           │
+│                ↓                                                │
+│  流水线完成后 → HTTP POST 事件推送至 nullclaw                    │
+│  事件载荷：{ thread_id, category, summary, messages[] }         │
+└─────────────────────────────────────────────────────────────────┘
+                ↓
+┌─────────────────────────────────────────────────────────────────┐
+│  nullclaw channels（接收 thread_processed 事件）                 │
+│                                                                 │
+│  nullclaw 决策：此话题是否值得提取实体和关系？                   │
+│  （根据 category、内容复杂度、置信度阈值判断）                   │
+│                ↓                                                │
 │  ┌───────────────────────────────────────────────────────────┐  │
-│  │  知识图谱提取（异步，尽力而为）                            │  │
+│  │  nullclaw 知识图谱提取 Routine（尽力而为）                 │  │
 │  │                                                           │  │
-│  │  1. LLM 尝试识别实体和关系：                              │  │
-│  │     输入：消息内容 + 上下文 + 固定类型定义                │  │
+│  │  1. LLM 识别实体和关系：                                  │  │
+│  │     输入：话题摘要 + 关键消息 + 固定类型定义               │  │
 │  │     输出：{                                               │  │
 │  │       entities: [{type, key, name, attributes}],          │  │
 │  │       relations: [{source, target, type, attributes}],    │  │
@@ -2695,36 +2708,54 @@ COMMENT ON TABLE knowledge_edges IS '知识图谱边：显式建模(固定字段
 │  │     }                                                     │  │
 │  │                                                           │  │
 │  │  2. 实体归一化：                                          │  │
-│  │     - 固定类型匹配：person → chat_users                   │  │
-│  │     - 固定类型匹配：team → chat_rooms                     │  │
-│  │     - 固定类型匹配：topic → topic_threads                 │  │
+│  │     - person → 匹配 chat_users                           │  │
+│  │     - team   → 匹配 chat_rooms                           │  │
+│  │     - topic  → 关联 topic_threads.id                     │  │
 │  │                                                           │  │
-│  │  3. 写入图谱（容错）：                                    │  │
+│  │  3. 调用平台 API 写入图谱（容错，失败不重试）：            │  │
+│  │     POST /api/v1/knowledge/graph/nodes  写入节点          │  │
+│  │     POST /api/v1/knowledge/graph/edges  写入关系          │  │
 │  │     - 固定字段写入固定列                                  │  │
 │  │     - 扩展属性写入 attributes JSONB                       │  │
-│  │     - 新发现的边类型记录到 edge_type                      │  │
-│  │     - 失败不影响主流程                                    │  │
+│  │     - 新发现的边类型直接写入 edge_type 字段               │  │
 │  └───────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 
-示例提取：
-消息："张三希望赵六支持环境搭建，目前卡在测试服务器没到位"
+示例：nullclaw 处理话题事件后提取
 
-LLM 提取结果：
+话题摘要："张三希望赵六支持环境搭建，目前卡在测试服务器没到位"
+
+nullclaw LLM 提取结果：
 {
   "entities": [
     {"type": "person", "key": "张三", "name": "张三"},
     {"type": "person", "key": "赵六", "name": "赵六"},
-    {"type": "thing", "key": "测试服务器", "name": "测试服务器", "attributes": {"sub_type": "resource", "amount": 3}},
-    {"type": "thing", "key": "环境搭建", "name": "环境搭建", "attributes": {"sub_type": "task"}}
+    {"type": "thing", "key": "测试服务器", "name": "测试服务器",
+     "attributes": {"sub_type": "resource", "amount": 3}},
+    {"type": "thing", "key": "环境搭建", "name": "环境搭建",
+     "attributes": {"sub_type": "task"}}
   ],
   "relations": [
-    {"source": "赵六", "target": "张三", "type": "supports", "attributes": {"support_type": "技术", "context": "环境搭建", "status": "pending"}},
-    {"source": "张三", "target": "测试服务器", "type": "requires", "attributes": {"urgency": "high"}},
-    {"source": "测试服务器", "target": "环境搭建", "type": "blocks", "attributes": {"reason": "资源未到位"}}
+    {"source": "赵六", "target": "张三", "type": "supports",
+     "attributes": {"support_type": "技术", "context": "环境搭建", "status": "pending"}},
+    {"source": "张三", "target": "测试服务器", "type": "requires",
+     "attributes": {"urgency": "high"}},
+    {"source": "测试服务器", "target": "环境搭建", "type": "blocks",
+     "attributes": {"reason": "资源未到位"}}
   ]
 }
+
+nullclaw 调用：
+  POST /api/v1/knowledge/graph/nodes  →  写入 4 个实体节点
+  POST /api/v1/knowledge/graph/edges  →  写入 3 条关系边
 ```
+
+**责任边界**：
+
+| 层 | 职责 | 不做 |
+|----|------|------|
+| RippleFlow（机制） | 提供图谱读写 API；存储节点和边 | 不提取实体，不判断关系 |
+| nullclaw（策略） | 决定何时提取；调用 LLM 识别实体关系；写入图谱 | 不修改流水线逻辑 |
 
 ### 19.7 图谱查询场景
 
@@ -5205,9 +5236,10 @@ compact_rules:
     trigger:
       condition: "last_access_at > 180 days ago"
       schedule: "0 3 * * 0"  # 每周日凌晨3点检查
+      executor: "nullclaw"   # 由 nullclaw cron 触发，非平台流水线
     action:
       - name: "extract_entities"
-        description: "提取实体到知识图谱"
+        description: "nullclaw 调用 LLM 提取实体/关系，写入知识图谱（POST /api/v1/knowledge/graph/nodes|edges）"
       - name: "update_decision_log"
         description: "更新决策时间线"
     preserve:
