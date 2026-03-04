@@ -3,5 +3,28 @@
     "allow": [
       "Bash(python:*)"
     ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python D:\\RippleFlow\\.claude\\hooks\\post_edit_check.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python D:\\RippleFlow\\.claude\\hooks\\stop_reminder.py"
+          }
+        ]
+      }
+    ]
   }
 }
