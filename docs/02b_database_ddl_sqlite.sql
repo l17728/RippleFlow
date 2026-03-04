@@ -650,7 +650,7 @@ CREATE TABLE processing_queue (
     id           TEXT PRIMARY KEY,
     message_id   TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     stage        TEXT NOT NULL CHECK (
-        stage IN ('pending', 'embedding', 'classifying', 'linking', 'completed', 'failed')
+        stage IN ('pending', 'classifying', 'linking', 'completed', 'failed')
     ),
     attempts     INTEGER DEFAULT 0,
     last_error   TEXT,
@@ -680,8 +680,8 @@ CREATE TABLE app_settings (
 INSERT INTO app_settings (key, value) VALUES
 ('schema_version', '1.0.0'),
 ('llm_model', 'glm-4-plus'),
-('embedding_model', 'text-embedding-3-small'),
 ('system_prompt_version', '1');
+-- 注：系统不使用向量检索，无 embedding_model 配置
 
 -- =============================================================
 -- VIEWS: 常用查询视图

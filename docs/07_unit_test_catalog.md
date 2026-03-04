@@ -405,7 +405,10 @@ async def test_run_no_category_above_threshold_skips_downstream(mock_llm, mock_m
     thread_svc.extend.assert_not_awaited()
 ```
 
-### TC-PIPE-06：Stage 5 检测到摘要冲突，通知当事人
+### TC-PIPE-06：摘要更新检测到冲突，通知当事人（nullclaw 侧逻辑）
+
+> **注意**：Stage 5 摘要更新已移交 nullclaw，本用例测试平台侧的冲突通知触发（`notify_svc.send_bulk`），
+> 实际摘要更新决策由 nullclaw 做出，平台只负责存储更新结果和发送通知。
 
 ```python
 async def test_stage5_conflict_notifies_stakeholders(mock_llm, mock_message_svc):
@@ -2085,7 +2088,170 @@ async def test_get_stats():
 
 ---
 
-## 19. 附录：测试用例索引
+## 19. FaqService（FAQ 知识库管理）
+
+> **归属**：`FaqService` 是 RippleFlow 平台层提供的 FAQ CRUD 接口，供 nullclaw 调用写入和查询 FAQ 条目。
+> nullclaw 的生成策略逻辑不在本目录测试范围内。
+
+### 测试前置条件
+
+```python
+@pytest.fixture
+async def mock_faq_repo():
+    repo = AsyncMock()
+    repo.get_item.return_value = {
+        "id": "faq-001",
+        "section_id": "sec-001",
+        "question": "Redis 连接池怎么配置？",
+        "answer": "建议 maxPoolSize = CPU核心数 × 2",
+        "source_threads": ["thread-abc"],
+        "confidence": 0.9,
+        "review_status": "confirmed",
+    }
+    return repo
+```
+
+### TC-FAQ-01：创建 FAQ 条目，默认 pending 状态
+
+```python
+async def test_create_faq_item_defaults_to_pending(mock_faq_repo):
+    svc = FaqServiceImpl(faq_repo=mock_faq_repo)
+    result = await svc.create_item(
+        section_id="sec-001",
+        question="如何配置 Nginx 反向代理？",
+        answer="使用 proxy_pass 指令...",
+        source_threads=["thread-xyz"],
+        created_by="nullclaw",
+    )
+    assert result.review_status == "pending"
+    assert result.created_by == "nullclaw"
+```
+
+### TC-FAQ-02：管理员审核通过，状态变更为 confirmed
+
+```python
+async def test_review_faq_item_confirmed(mock_faq_repo, mock_admin_user):
+    svc = FaqServiceImpl(faq_repo=mock_faq_repo)
+    result = await svc.review_item(
+        item_id="faq-001",
+        reviewer_id=mock_admin_user.id,
+        action="confirm",
+    )
+    assert result.review_status == "confirmed"
+    assert result.reviewed_by == mock_admin_user.id
+    assert result.reviewed_at is not None
+```
+
+### TC-FAQ-03：管理员驳回，状态变更为 rejected
+
+```python
+async def test_review_faq_item_rejected(mock_faq_repo, mock_admin_user):
+    svc = FaqServiceImpl(faq_repo=mock_faq_repo)
+    result = await svc.review_item(
+        item_id="faq-001",
+        reviewer_id=mock_admin_user.id,
+        action="reject",
+        reason="答案已过期，Redis 连接池推荐方式已更新",
+    )
+    assert result.review_status == "rejected"
+```
+
+### TC-FAQ-04：普通用户只能查看 confirmed 条目
+
+```python
+async def test_get_items_regular_user_sees_only_confirmed(mock_faq_repo):
+    mock_faq_repo.list_items.return_value = [
+        {"id": "faq-001", "review_status": "confirmed"},
+        {"id": "faq-002", "review_status": "pending"},
+    ]
+    svc = FaqServiceImpl(faq_repo=mock_faq_repo)
+    result = await svc.list_items(group_id="group-001", caller_role="member")
+    # 普通成员只能看到 confirmed 条目
+    assert all(item["review_status"] == "confirmed" for item in result)
+```
+
+### TC-FAQ-05：管理员可查看全部条目（含 pending）
+
+```python
+async def test_get_items_admin_sees_all(mock_faq_repo):
+    mock_faq_repo.list_items.return_value = [
+        {"id": "faq-001", "review_status": "confirmed"},
+        {"id": "faq-002", "review_status": "pending"},
+    ]
+    svc = FaqServiceImpl(faq_repo=mock_faq_repo)
+    result = await svc.list_items(group_id="group-001", caller_role="admin")
+    assert len(result) == 2
+```
+
+### TC-FAQ-06：更新 FAQ 条目，自动创建版本记录
+
+```python
+async def test_update_faq_item_creates_version(mock_faq_repo, mock_version_repo):
+    svc = FaqServiceImpl(faq_repo=mock_faq_repo, version_repo=mock_version_repo)
+    await svc.update_item(
+        item_id="faq-001",
+        answer="更新后的答案：建议 maxPoolSize = vCPU × 2 + 2",
+        change_by="nullclaw",
+        change_reason="根据新的性能测试数据更新推荐值",
+    )
+    # 必须创建版本快照
+    mock_version_repo.create.assert_awaited_once()
+    call_kwargs = mock_version_repo.create.call_args.kwargs
+    assert call_kwargs["change_type"] == "updated"
+    assert call_kwargs["change_by"] == "nullclaw"
+```
+
+### TC-FAQ-07：合并重复条目，保留所有 source_threads
+
+```python
+async def test_merge_faq_items_combines_source_threads(mock_faq_repo):
+    mock_faq_repo.get_item.side_effect = [
+        {"id": "faq-001", "source_threads": ["thread-a"]},
+        {"id": "faq-002", "source_threads": ["thread-b", "thread-c"]},
+    ]
+    svc = FaqServiceImpl(faq_repo=mock_faq_repo)
+    merged = await svc.merge_items(
+        source_ids=["faq-001", "faq-002"],
+        target={"question": "标准化问题", "answer": "合并后答案"},
+        merge_by="nullclaw",
+    )
+    # 合并后应包含所有来源线索
+    assert set(merged.source_threads) == {"thread-a", "thread-b", "thread-c"}
+```
+
+### TC-FAQ-08：用户反馈"答案有误"，helpful_count 不增加
+
+```python
+async def test_faq_unhelpful_feedback_no_helpful_increment(mock_faq_repo):
+    svc = FaqServiceImpl(faq_repo=mock_faq_repo)
+    await svc.submit_feedback(
+        item_id="faq-001",
+        user_id="alice",
+        feedback_type="unhelpful",
+        comment="Redis 版本升级后配置方式已变更",
+    )
+    # helpful_count 不应增加
+    update_call = mock_faq_repo.update_counters.call_args.kwargs
+    assert update_call.get("helpful_increment", 0) == 0
+```
+
+### TC-FAQ-09：FAQ 全文搜索，返回按热度排序的结果
+
+```python
+async def test_search_faq_returns_sorted_by_view_count(mock_faq_repo):
+    mock_faq_repo.search.return_value = [
+        {"id": "faq-003", "question": "Redis持久化", "view_count": 50},
+        {"id": "faq-001", "question": "Redis连接池", "view_count": 120},
+    ]
+    svc = FaqServiceImpl(faq_repo=mock_faq_repo)
+    result = await svc.search(group_id="group-001", query="Redis", sort_by="view_count")
+    # 按 view_count 降序
+    assert result[0]["id"] == "faq-001"
+```
+
+---
+
+## 20. 附录：测试用例索引
 
 | ID | 服务 | 方法 | 测试场景 | 覆盖业务规则 |
 |----|------|------|----------|-------------|
@@ -2168,3 +2334,12 @@ async def test_get_stats():
 | TC-TODO-04 | PersonalTodoService | list_todos | 获取待办列表 | 待办查询 |
 | TC-TODO-05 | PersonalTodoService | complete_todo | 完成待办 | 状态更新 |
 | TC-TODO-06 | PersonalTodoService | get_stats | 获取待办统计 | 统计计算 |
+| TC-FAQ-01 | FaqService | create_item | 创建条目默认 pending | 状态初始化 |
+| TC-FAQ-02 | FaqService | review_item | 审核通过变更 confirmed | 审核流程 |
+| TC-FAQ-03 | FaqService | review_item | 驳回变更 rejected | 审核流程 |
+| TC-FAQ-04 | FaqService | list_items | 普通用户只见 confirmed | 权限过滤 |
+| TC-FAQ-05 | FaqService | list_items | 管理员见全部 | 权限过滤 |
+| TC-FAQ-06 | FaqService | update_item | 更新自动创建版本快照 | 版本控制 |
+| TC-FAQ-07 | FaqService | merge_items | 合并保留所有 source_threads | 数据完整性 |
+| TC-FAQ-08 | FaqService | submit_feedback | unhelpful 不增加 helpful_count | 计数逻辑 |
+| TC-FAQ-09 | FaqService | search | 按 view_count 排序 | 搜索排序 |

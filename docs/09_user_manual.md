@@ -37,7 +37,8 @@
 | **智能消息处理** | 自动识别有价值信息，过滤噪声 |
 | **知识自动分类** | 将消息归类为决策、FAQ、故障案例、参考信息等9大类别 |
 | **话题线索管理** | 关联相关讨论，生成活摘要，持续更新 |
-| **搜索问答** | 自然语言提问，基于历史讨论生成精准答案 |
+| **搜索问答** | 自然语言提问，FAQ 优先命中，LLM 兜底生成综合答案 |
+| **FAQ 知识库** | 高频问答自动沉淀为结构化 FAQ，nullclaw 持续演进，经管理员审核后对外展示 |
 | **敏感内容保护** | 涉及隐私/人事的内容需当事人授权后才入库 |
 | **当事人修正** | 参与者可修正AI摘要，确保准确性 |
 | **参考信息管理** | 自动提取IP、URL等，形成团队知识手册 |
@@ -46,7 +47,7 @@
 
 ### 1.3 工作原理
 
-RippleFlow 通过 **6阶段流水线** 处理每条群聊消息：
+RippleFlow 平台通过 **5阶段流水线（Stage 0–4）** 处理每条群聊消息，处理完成后事件推送至 **nullclaw AI 管家** 进行摘要更新和知识挖掘：
 
 ```mermaid
 flowchart TD
@@ -57,9 +58,10 @@ flowchart TD
     D -->|有价值| F[Stage 2: 分类]
     F --> G[Stage 3: 话题匹配]
     G --> H[Stage 4: 结构化提取]
-    H --> I[Stage 5: 摘要更新]
-    I --> J[知识库存储]
-    
+    H --> I[知识库存储 + 事件推送]
+    I --> J[nullclaw AI管家]
+    J --> K[摘要更新 / FAQ生成 / 知识挖掘]
+
     C -->|授权通过| D
     C -->|拒绝| E
 ```
@@ -71,7 +73,7 @@ flowchart TD
 3. **Stage 2 - 分类**：将消息归类为9种信息类型之一
 4. **Stage 3 - 话题匹配**：判断属于现有话题还是创建新话题
 5. **Stage 4 - 结构化提取**：提取关键字段（决策内容、故障信息等）
-6. **Stage 5 - 摘要更新**：增量更新话题摘要，保留历史版本
+6. **（nullclaw）摘要更新**：Stage 4 完成后事件推送至 AI 管家，由管家决策并执行增量摘要更新、FAQ 生成等知识运营操作
 
 ---
 
@@ -154,15 +156,17 @@ flowchart TD
 - 7天未处理自动升级管理员
 - 任一当事人拒绝则永不处理
 
-### 3.5 AI管家服务
+### 3.5 AI管家服务（nullclaw）
 
-AI管家是平台的"灵魂"，提供主动服务：
+nullclaw AI管家是平台的"灵魂"，独立运行于 RippleFlow 平台之外，负责所有涉及自然语言理解和策略决策的智能行为：
 
+- **摘要更新**：Stage 4 完成后接收事件，决策并执行话题摘要的增量更新
+- **FAQ 自动生成**：将高频 `qa_faq` 类线索提炼为结构化 FAQ 条目
 - **每周知识快报**：统计新增知识、热门讨论、即将到期待办
 - **待办到期提醒**：提前1天提醒任务负责人
 - **敏感授权跟进**：实时通知授权状态变化
 - **知识库健康报告**：评估知识覆盖率、问答质量
-- **自主学习优化**：分析使用模式，持续改进服务
+- **自主学习优化**：分析使用模式，通过自省周期持续改进服务
 
 ---
 
@@ -199,11 +203,12 @@ graph TB
 
 **功能模块**：
 - 知识库浏览（按类别、时间、标签筛选）
-- 搜索问答（自然语言提问）
+- **FAQ 知识库**（章节树浏览、全文搜索、来源溯源、答案反馈）
+- 搜索问答（自然语言提问，FAQ 优先命中）
 - 敏感授权处理
 - 当事人修改摘要
 - 个人贡献统计
-- 管理后台（白名单、类别管理）
+- 管理后台（白名单、类别管理、**FAQ 审核队列**）
 
 #### 4.1.2 聊天机器人（即时查询）
 
@@ -309,6 +314,73 @@ sequenceDiagram
 - 关键词搜索结果相关性
 - 结果按时间/引用次数排序
 - 详情页展示完整信息
+
+---
+
+### 4.3b 场景二补充：FAQ 知识库（群聊知识沉淀）
+
+**场景描述**：群聊中积累的高频问答自动整理为结构化 FAQ，用户可直接查阅或通过机器人引用
+
+**FAQ 来源**：由 nullclaw AI 管家自动分析 `qa_faq` 类话题线索，提炼标准问答对，经管理员审核后对外展示
+
+**查阅方式A - Web Dashboard FAQ 知识库模块**：
+
+```
+📚 技术群知识库
+
+[搜索框] Redis连接池...
+
+📂 环境配置 (23)
+   📂 Redis 配置 (8)
+   └── Redis 连接池大小怎么配置？ ✅已确认
+   └── Redis 持久化选 RDB 还是 AOF？ ✅已确认
+   📂 Docker 相关 (9)
+
+📂 架构决策 (15)
+   └── 为什么选择 SQLAlchemy 而不是 Django ORM？ ✅已确认
+
+📂 故障排查 (31)
+```
+
+**查阅方式B - 机器人直接引用 FAQ**：
+
+```
+用户：@机器人 Redis连接池怎么配置
+
+🤖 机器人回复：
+📚 根据知识库 FAQ：
+
+Redis 连接池大小建议设置为 CPU核心数 × 2。
+生产环境推荐配置：
+  maxPoolSize: 20
+  minPoolSize: 5
+  idleTimeout: 30000ms
+
+📎 来源：[3月1日技术群讨论] | [Redis最佳实践]
+❓ 答案有误？回复"反馈"
+```
+
+**FAQ 审核状态说明**：
+
+| 状态 | 说明 | 可见范围 |
+|------|------|----------|
+| ✅ 已确认 | 管理员审核通过 | 所有用户 |
+| 🕐 待审核 | AI生成，待管理员确认 | 仅管理员 |
+| ❌ 已驳回 | 内容不准确，已下架 | 仅管理员 |
+
+**用户反馈**：每条 FAQ 底部可点击"✅ 有帮助"或"❌ 答案有误"，反馈由 nullclaw 收集用于质量优化
+
+**用户价值**：
+- 相同问题无需重复询问，直接查 FAQ
+- 答案经管理员确认，可信度高
+- 可溯源到原始群聊讨论
+- FAQ 随团队积累自动增长、持续演进
+
+**E2E测试要点**：
+- FAQ 搜索准确性
+- 机器人引用 FAQ 时标注来源
+- 管理员审核操作（确认/驳回）
+- 用户反馈提交
 
 ---
 
@@ -953,12 +1025,17 @@ graph TB
     
     subgraph 任务队列
         Celery[Celery Workers]
-        Worker1[ProcessingPipeline]
-        Worker2[SummaryUpdate]
+        Worker1[ProcessingPipeline<br/>Stage 0-4]
         Worker3[Notification]
         Worker4[SyncToChat]
         Worker5[Escalation]
-        Worker6[ButlerScheduler]
+    end
+
+    subgraph nullclaw管家
+        NC[nullclaw AI Agent]
+        NC1[摘要更新]
+        NC2[FAQ生成]
+        NC3[知识运营]
     end
     
     Web --> Router3
@@ -979,7 +1056,9 @@ graph TB
     S1 & S10 & S11 & S12 <--> Chat
     
     S2 --> Celery
-    Celery --> Worker1 & Worker2 & Worker3 & Worker4 & Worker5 & Worker6
+    Celery --> Worker1 & Worker3 & Worker4 & Worker5
+    Worker1 -->|事件推送| NC
+    NC --> NC1 & NC2 & NC3
 ```
 
 ### 5.2 消息处理流水线详细流程
@@ -1025,12 +1104,11 @@ sequenceDiagram
             Note over Worker: Stage 4: 结构化提取
             Worker->>LLM: extract_structured()
             Worker->>Thread: extend() 或 create()
-            
-            Note over Worker: Stage 5: 摘要更新
-            Worker->>LLM: update_summary()
-            Worker->>DB: 更新topic_threads
-            Worker->>DB: 保存历史版本
             Worker->>DB: 状态=classified
+            Worker->>Queue: 推送事件至 nullclaw
+            Note over Queue: nullclaw 接收事件
+            Queue->>LLM: update_summary()（nullclaw决策）
+            LLM-->>DB: 更新topic_threads摘要（异步）
         end
     end
 ```

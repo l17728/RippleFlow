@@ -2027,6 +2027,132 @@ test.describe('Batch Operations API Tests', () => {
 | 4.9 AI 管家每周快报 | TC-BUTLER-001 ~ TC-BUTLER-009 | ✅ 已覆盖 |
 | 4.10 问答反馈 | TC-FB-001 ~ TC-FB-005 | ✅ 已覆盖 |
 | 4.11 个人贡献统计 | TC-CONTRIB-001 ~ TC-CONTRIB-005 | ✅ 已覆盖 |
+| 4.3b FAQ 知识库 | TC-FAQ-E2E-001 ~ TC-FAQ-E2E-007 | ✅ 已覆盖 |
+
+---
+
+## Part 5b：FAQ 知识库 E2E 测试
+
+### TC-FAQ-E2E-001：浏览 FAQ 章节目录
+
+```typescript
+test('FAQ 知识库 - 章节目录树展示', async ({ page }) => {
+  await page.goto('/faq/group_tech_001');
+
+  // 左侧章节树应展示
+  await expect(page.locator('[data-testid="faq-section-tree"]')).toBeVisible();
+  await expect(page.locator('text=环境配置')).toBeVisible();
+  await expect(page.locator('text=架构决策')).toBeVisible();
+
+  // 点击章节展开
+  await page.click('text=环境配置');
+  await expect(page.locator('text=Redis 配置')).toBeVisible();
+});
+```
+
+### TC-FAQ-E2E-002：FAQ 关键词搜索
+
+```typescript
+test('FAQ 搜索 - 关键词命中高亮', async ({ page }) => {
+  await page.goto('/faq/group_tech_001');
+
+  await page.fill('[data-testid="faq-search-input"]', 'Redis 连接池');
+  await page.keyboard.press('Enter');
+
+  // 搜索结果应包含关键词高亮
+  const results = page.locator('[data-testid="faq-result-item"]');
+  await expect(results).toHaveCount({ min: 1 });
+  await expect(page.locator('mark:has-text("Redis")')).toBeVisible();
+
+  // 每条结果应显示来源链接
+  await expect(page.locator('[data-testid="faq-source-link"]').first()).toBeVisible();
+});
+```
+
+### TC-FAQ-E2E-003：FAQ 答案来源溯源
+
+```typescript
+test('FAQ 来源溯源 - 点击跳转原始讨论', async ({ page, context }) => {
+  await page.goto('/faq/group_tech_001/items/faq-001');
+
+  // 来源区域应显示关联 thread 数量
+  await expect(page.locator('[data-testid="faq-source-count"]')).toContainText('条相关讨论');
+
+  // 点击来源链接，应在新标签打开 thread 详情
+  const [newPage] = await Promise.all([
+    context.waitForEvent('page'),
+    page.click('[data-testid="faq-source-link"]'),
+  ]);
+  await expect(newPage.url()).toContain('/threads/');
+});
+```
+
+### TC-FAQ-E2E-004：管理员审核 FAQ（确认）
+
+```typescript
+test('管理员审核 - 确认 FAQ 条目', async ({ adminPage }) => {
+  await adminPage.goto('/admin/faq/review');
+
+  // 审核队列应显示 pending 条目
+  const pendingItem = adminPage.locator('[data-testid="faq-pending-item"]').first();
+  await expect(pendingItem).toBeVisible();
+
+  // 点击"确认"
+  await pendingItem.locator('[data-testid="btn-confirm"]').click();
+  await expect(adminPage.locator('[data-testid="toast-success"]')).toContainText('已确认');
+});
+```
+
+### TC-FAQ-E2E-005：管理员驳回 FAQ
+
+```typescript
+test('管理员审核 - 驳回 FAQ 条目', async ({ adminPage }) => {
+  await adminPage.goto('/admin/faq/review');
+
+  const pendingItem = adminPage.locator('[data-testid="faq-pending-item"]').first();
+  await pendingItem.locator('[data-testid="btn-reject"]').click();
+
+  // 弹出驳回原因输入框
+  await expect(adminPage.locator('[data-testid="reject-reason-dialog"]')).toBeVisible();
+  await adminPage.fill('[data-testid="reject-reason-input"]', '答案与最新实践不符');
+  await adminPage.click('[data-testid="btn-confirm-reject"]');
+
+  await expect(adminPage.locator('[data-testid="toast-success"]')).toContainText('已驳回');
+});
+```
+
+### TC-FAQ-E2E-006：用户提交"答案有误"反馈
+
+```typescript
+test('FAQ 反馈 - 提交答案有误', async ({ page }) => {
+  await page.goto('/faq/group_tech_001/items/faq-001');
+
+  await page.click('[data-testid="btn-unhelpful"]');
+  await expect(page.locator('[data-testid="feedback-comment-input"]')).toBeVisible();
+  await page.fill('[data-testid="feedback-comment-input"]', 'Redis 版本升级后配置方式已变更');
+  await page.click('[data-testid="btn-submit-feedback"]');
+
+  await expect(page.locator('[data-testid="toast-success"]')).toContainText('反馈已提交');
+});
+```
+
+### TC-FAQ-E2E-007：机器人回答优先引用 FAQ
+
+```typescript
+test('机器人问答 - FAQ 优先命中', async ({ page }) => {
+  await page.goto('/chat/group_tech_001');
+
+  await page.fill('[data-testid="chat-input"]', '@机器人 Redis连接池怎么配置');
+  await page.keyboard.press('Enter');
+
+  const botReply = page.locator('[data-testid="bot-message"]').last();
+  await expect(botReply).toBeVisible({ timeout: 5000 });
+
+  // 回复应包含 FAQ 来源标注
+  await expect(botReply).toContainText('根据知识库 FAQ');
+  await expect(botReply.locator('[data-testid="faq-source-link"]')).toBeVisible();
+});
+```
 
 ---
 
