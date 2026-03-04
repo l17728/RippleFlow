@@ -175,14 +175,15 @@ SQLite (初期) ──→ 系统压力增大 ──→ PostgreSQL (升级)
            │
            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  Celery Workers (独立进程)                                            │
-│                                                                     │
-│  ProcessingPipeline      消息 6 阶段处理（Stage 0–5）                │
-│  SummaryUpdateWorker     增量摘要更新                                │
-│  NotificationWorker      App 内通知推送                              │
-│  ReminderScheduler       敏感授权每日提醒（Celery Beat）              │
-│  SyncToChatWorker        修改结果同步至聊天群（用户确认后）            │
-│  EscalationWorker        敏感授权超时升级（新增）                      │
+│  Celery Workers (独立进程)                                        │
+│                                                                   │
+│  ProcessingPipeline      消息 6 阶段处理（Stage 0–5）              │
+│  SummaryUpdateWorker     增量摘要更新                              │
+│  NotificationWorker      App 内通知推送                            │
+│  SyncToChatWorker        修改结果同步至聊天群（用户确认后）          │
+│  EscalationWorker        敏感授权超时升级                           │
+│                                                                   │
+│  注：定时任务由 nullclaw cron 调度，不在此处运行                    │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -441,13 +442,21 @@ POST /api/v1/qa
 
 ```yaml
 services:
-  db:         # PostgreSQL 15
-  redis:      # Redis 7
+  db:         # PostgreSQL 15 或 SQLite（轻量场景）
+  redis:      # Redis 7（可选，仅用于缓存）
   api:        # FastAPI（uvicorn，多进程）
   worker:     # Celery Worker（消息处理流水线）
-  beat:       # Celery Beat（定时提醒任务）
+  nullclaw:   # nullclaw Agent（AI 管家 + 定时任务）
   frontend:   # Vue 3 静态文件（Nginx）
 ```
+
+**变更说明**：
+
+| 服务 | 原设计 | 新设计 |
+|------|--------|--------|
+| `beat` | Celery Beat（定时任务） | **删除**，由 nullclaw cron 替代 |
+| `nullclaw` | 无 | **新增**，运行 AI 管家 Agent |
+| `redis` | 必需（消息队列 + 缓存） | **可选**，仅用于缓存 |
 
 所有服务通过内网通信，仅 Nginx（前端+API 反代）对内网暴露端口。
 
@@ -463,6 +472,7 @@ services:
 | RippleFlow → 聊天工具 | `POST {CHAT_TOOL_API}/send` | 发送回复（用户确认后） |
 | 聊天机器人 → RippleFlow | `POST /api/v1/bot/query` | 自然语言查询入口 |
 | AI 管家 → 聊天工具 | `POST {CHAT_TOOL_API}/send` | 主动推送快报/提醒 |
+| **RippleFlow → nullclaw** | `POST {NULLCLAW_GATEWAY}/webhook/rippleflow` | **事件推送（新增）** |
 
 ### 10.2 内部服务接口（Python Protocol）
 
@@ -474,49 +484,59 @@ services:
 
 ---
 
-## 11. AI 管家数据流
+## 11. AI 管家数据流（nullclaw 调度）
 
-AI 管家是 RippleFlow 的"运营大脑"，负责主动推送和知识库健康维护。
+AI 管家由 **nullclaw** 运行，负责主动推送和知识库健康维护。
 
-### 11.1 每周知识快报流程
+### 11.1 架构变更说明
 
 ```
-Celery Beat (每周一 9:00)
+原设计（已废弃）：
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│ Celery Beat │ ──→ │ AIButlerSvc │ ──→ │ 聊天工具    │
+└─────────────┘     └─────────────┘     └─────────────┘
+
+新设计：
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│ nullclaw    │ ──→ │ rf commands │ ──→ │ 聊天工具    │
+│ cron/trigger│     │ (CLI)       │     │             │
+└─────────────┘     └─────────────┘     └─────────────┘
+```
+
+### 11.2 每周知识快报流程
+
+```
+nullclaw cron (每周一 9:00)
         │
         ▼
-AIButlerService.generate_weekly_digest()
+执行 Routine: routine_weekly_review.md
         │
-        ├── 1. 统计上周数据
-        │       ├── 新增话题线索数量（按类别）
-        │       ├── 热门讨论 Top 5（按消息数）
-        │       ├── 新增技术决策
-        │       └── 即将到期待办
+        ├── 1. 获取上周数据
+        │       rf threads list --from last-week -o json
+        │       rf todos list --completed-this-week -o json
+        │       rf contribution leaderboard --period week -o json
         │
-        ├── 2. LLM 生成快报文案
-        │       输入：统计数据
-        │       输出：结构化快报内容
+        ├── 2. 生成快报内容（LLM 处理）
         │
-        ├── 3. 推送到主群
-        │       调用 ChatToolService.send_card_reply()
-        │       格式：卡片消息
+        ├── 3. 推送到群
+        │       rf butler digest --room <room_id> --type weekly
         │
-        └── 4. 记录推送历史
-                写入 butler_tasks 表
+        └── 4. 记录任务
+                rf butler tasks --log "weekly_digest completed"
 ```
 
-### 11.2 待办到期提醒流程
+### 11.3 待办到期提醒流程
 
 ```
-Celery Beat (每日 9:00)
+nullclaw cron (每日 9:00)
         │
         ▼
-AIButlerService.check_action_items_due()
+执行 Routine: routine_todo_reminder.md
         │
-        ├── 1. 查询即将到期待办
-        │       WHERE due_date IN (NOW, NOW + 1 day)
-        │       AND status != 'done'
+        ├── 1. 查询今日到期待办
+        │       rf todos list --due-today --status open -o json
         │
-        ├── 2. 按被分配者分组
+        ├── 2. 按责任人分组
         │
         ├── 3. 推送提醒到群
         │       @被分配者 您有 X 个待办即将到期
