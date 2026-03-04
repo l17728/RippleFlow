@@ -7294,4 +7294,145 @@ review_status=confirmed → 对普通用户可见
 
 ---
 
+## 34. nullclaw 依赖管理（P0-2）
+
+### 34.1 依赖关系概述
+
+RippleFlow 平台与 nullclaw 之间存在**单向推送依赖**：平台流水线（Stage 0-4）结束后，通过 HTTP POST 将事件推送至 nullclaw 网关；nullclaw 通过 `rf` CLI 命令（HTTP API）调用平台能力。
+
+```
+RippleFlow Platform                nullclaw Agent
+─────────────────                  ─────────────────
+流水线事件推送 ──────────────────► 事件接收（webhook）
+                                   │
+RF API ◄────────────────────────── rf CLI 调用（rf threads, rf qa, ...）
+```
+
+**平台对 nullclaw 的依赖**：仅事件推送（Fire-and-Forget），不等待响应。
+**nullclaw 对平台的依赖**：读写 API、CLI 命令，需要平台正常运行。
+
+### 34.2 SLA 目标
+
+| 指标 | 目标值 | 说明 |
+|------|--------|------|
+| 事件推送成功率 | ≥ 99% | nullclaw 在线时；离线时进入本地队列 |
+| 推送 P99 延迟 | ≤ 500ms | HTTP POST 超时上限 |
+| 推送重试窗口 | 24 小时 | 超过后告警管理员 |
+| nullclaw 不可用最大影响 | 无损平台核心功能 | 摘要更新延迟，不影响消息存储/问答 |
+| RF API 对 nullclaw 可用性 | 99.9% | nullclaw CLI 依赖平台 |
+
+### 34.3 事件推送策略（RippleFlow → nullclaw）
+
+```
+Stage 4 完成
+     │
+     ▼
+POST {NULLCLAW_GATEWAY}/webhook/rippleflow
+     │
+     ├── 成功 (2xx)
+     │       └── 记录日志，继续
+     │
+     └── 失败 (连接超时 / 非 2xx)
+             │
+             ▼
+         写入本地待处理队列（nullclaw_pending_events 表）
+         status = 'pending', retry_count = 0
+```
+
+#### 重试策略
+
+| 重试次数 | 间隔 | 说明 |
+|----------|------|------|
+| 第 1 次 | 立即 | 瞬时抖动 |
+| 第 2 次 | 30 秒 | 指数退避 |
+| 第 3 次 | 5 分钟 | 指数退避 |
+| 第 4 次 | 30 分钟 | 长间隔 |
+| 第 5 次（最终） | 2 小时 | 最大重试 |
+| 超过 24 小时未投递 | — | 告警管理员，status → 'expired' |
+
+#### nullclaw_pending_events 表（DDL 补充）
+
+```sql
+-- PostgreSQL
+CREATE TABLE nullclaw_pending_events (
+    id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    event_type  VARCHAR(50) NOT NULL,          -- message_processed | thread_updated
+    payload     JSONB NOT NULL,
+    status      VARCHAR(20) DEFAULT 'pending'
+                CHECK (status IN ('pending','delivered','failed','expired')),
+    retry_count INTEGER DEFAULT 0,
+    next_retry_at TIMESTAMPTZ DEFAULT NOW(),
+    last_error  TEXT,
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    delivered_at TIMESTAMPTZ
+);
+CREATE INDEX idx_pending_events_retry ON nullclaw_pending_events (next_retry_at)
+    WHERE status = 'pending';
+```
+
+### 34.4 nullclaw 不可用时的降级模式（最小可用模式）
+
+当 nullclaw 不可用时，RippleFlow 平台核心功能**完全不受影响**：
+
+| 功能 | nullclaw 可用 | nullclaw 不可用 | 降级说明 |
+|------|---------------|-----------------|----------|
+| 消息接收与存储 | ✅ | ✅ | 无依赖 |
+| Stage 0–4 流水线 | ✅ | ✅ | 无依赖 |
+| FAQ 问答（Q&A） | ✅ | ✅ | 平台全文检索兜底 |
+| 敏感信息授权 | ✅ | ✅ | 无依赖 |
+| 摘要更新（Stage 5） | ✅ | ⚠️ 延迟 | 事件进入待处理队列 |
+| 每日摘要推送 | ✅ | ⚠️ 跳过 | nullclaw cron 不执行 |
+| FAQ 自动生成 | ✅ | ⚠️ 延迟 | nullclaw Routine 不执行 |
+| 知识图谱更新 | ✅ | ⚠️ 延迟 | nullclaw Routine 不执行 |
+
+**最小可用模式**：即使 nullclaw 完全不可用，平台仍可提供消息存储、检索、问答、敏感授权等核心服务。管理员可手动触发摘要更新：`rf butler digest --manual`。
+
+### 34.5 nullclaw 调用平台的超时/重试策略
+
+nullclaw 通过 `rf` CLI 命令调用平台 API，超时策略由 nullclaw 侧配置：
+
+```yaml
+# nullclaw 配置（供参考，实际由 nullclaw 维护）
+rippleflow_api:
+  base_url: "http://rippleflow:8000"
+  timeout: 30s                    # 单次请求超时
+  retry:
+    max_attempts: 3
+    backoff: exponential           # 1s → 2s → 4s
+    retry_on: [429, 500, 502, 503, 504]
+  circuit_breaker:
+    threshold: 5                   # 连续 5 次失败开启熔断
+    half_open_after: 60s           # 60s 后探测是否恢复
+```
+
+### 34.6 健康检查端点
+
+```
+GET /health/nullclaw     # 平台检查 nullclaw 是否可达
+GET /health/pending      # 待处理事件队列状态
+```
+
+响应示例：
+```json
+{
+  "nullclaw": {
+    "status": "degraded",
+    "last_success": "2026-03-05T08:30:00Z",
+    "pending_events": 47,
+    "oldest_pending_age_minutes": 23
+  }
+}
+```
+
+### 34.7 监控与告警
+
+| 指标 | 告警阈值 | 告警对象 |
+|------|----------|----------|
+| `nullclaw_pending_events_total` | ≥ 100 | 管理员 |
+| `nullclaw_oldest_pending_age_minutes` | ≥ 60 | 管理员 |
+| `nullclaw_delivery_failures_total` (5min) | ≥ 10 | 管理员 |
+| `nullclaw_circuit_breaker_open` | = 1 | 管理员 |
+
+---
+
 **END OF DOCUMENT**

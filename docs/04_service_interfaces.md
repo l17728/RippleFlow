@@ -1296,21 +1296,43 @@ class IAIButlerService(Protocol):
         event_type: str,
         payload: dict,
     ) -> bool:
-        """
-        推送事件到 nullclaw。
+        """推送事件到 nullclaw（Fire-and-Forget，不阻塞主流程）
+
         RippleFlow 平台在业务操作完成后，通过此方法推送事件到 nullclaw。
-        返回推送是否成功。
+        返回推送是否成功（True=直接投递成功，False=已进入待处理队列）。
 
         支持的事件类型：
-        - message.received: 新消息入库
-        - thread.created: 新话题线索创建
-        - thread.updated: 话题线索更新
-        - todo.created: 待办创建
-        - todo.completed: 待办完成
-        - sensitive.detected: 敏感内容检测
-        - sensitive.authorized: 敏感授权完成
-        - user.query: 用户发起问答
-        - user.feedback: 用户提交反馈
+        - message_processed: Stage 0-4 完成，新消息入库（含 thread_id, category）
+        - thread_updated: 话题线索摘要/状态更新
+        - sensitive_resolved: 敏感授权全部完成
+
+        **降级行为（P0-2）**：
+        推送失败时（连接超时 / 非 2xx），事件写入 nullclaw_pending_events 表，
+        后台 RetryWorker 按指数退避重试（最多 5 次，24 小时内）。
+        不抛出异常——nullclaw 不可用不影响平台核心流程。
+
+        **超时设置**：HTTP POST 超时 500ms，不等待 nullclaw 处理结果。
+        """
+        ...
+
+    async def list_pending_events(
+        self,
+        status: str = "pending",
+        limit: int = 100,
+    ) -> list[dict]:
+        """获取待处理事件队列状态（运维/健康检查使用）"""
+        ...
+
+    async def retry_pending_events(self) -> int:
+        """后台 RetryWorker 调用：重试到期的待处理事件，返回本次成功投递数量
+
+        重试策略（指数退避）：
+        retry_count=0 → 立即重试
+        retry_count=1 → 30s 后
+        retry_count=2 → 5min 后
+        retry_count=3 → 30min 后
+        retry_count=4 → 2h 后
+        retry_count≥5 → status → 'expired'，告警管理员
         """
         ...
 ```

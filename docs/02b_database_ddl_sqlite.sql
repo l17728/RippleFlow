@@ -839,3 +839,25 @@ CREATE INDEX idx_faq_versions_item ON faq_versions(item_id, version DESC);
 -- =============================================================
 -- END OF DDL
 -- =============================================================
+-- =============================================================
+-- nullclaw 依赖管理（P0-2）
+-- =============================================================
+
+-- nullclaw 待处理事件队列（RippleFlow → nullclaw 推送失败时暂存）
+CREATE TABLE nullclaw_pending_events (
+    id              TEXT PRIMARY KEY,          -- 应用层 uuid.uuid4() 生成
+    event_type      TEXT NOT NULL
+                    CHECK (event_type IN ('message_processed', 'thread_updated', 'sensitive_resolved')),
+    payload         TEXT NOT NULL DEFAULT '{}', -- JSON 格式
+    status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'delivered', 'failed', 'expired')),
+    retry_count     INTEGER NOT NULL DEFAULT 0,
+    next_retry_at   TEXT NOT NULL DEFAULT (datetime('now')), -- ISO8601
+    last_error      TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    delivered_at    TEXT
+);
+
+CREATE INDEX idx_pending_events_retry ON nullclaw_pending_events (next_retry_at)
+    WHERE status = 'pending';
+CREATE INDEX idx_pending_events_status ON nullclaw_pending_events (status, created_at DESC);

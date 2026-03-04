@@ -2106,3 +2106,28 @@ COMMENT ON TABLE faq_versions IS 'FAQ 变更历史：记录每次修改，支持
 -- =============================================================
 -- END OF DDL
 -- =============================================================
+
+-- =============================================================
+-- nullclaw 依赖管理（P0-2）
+-- =============================================================
+
+-- nullclaw 待处理事件队列（RippleFlow → nullclaw 推送失败时暂存）
+CREATE TABLE nullclaw_pending_events (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    event_type      VARCHAR(50) NOT NULL
+                    CHECK (event_type IN ('message_processed', 'thread_updated', 'sensitive_resolved')),
+    payload         JSONB NOT NULL DEFAULT '{}',
+    status          VARCHAR(20) NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'delivered', 'failed', 'expired')),
+    retry_count     INTEGER NOT NULL DEFAULT 0,
+    next_retry_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_error      TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    delivered_at    TIMESTAMPTZ
+);
+
+CREATE INDEX idx_pending_events_retry ON nullclaw_pending_events (next_retry_at)
+    WHERE status = 'pending';
+CREATE INDEX idx_pending_events_status ON nullclaw_pending_events (status, created_at DESC);
+
+COMMENT ON TABLE nullclaw_pending_events IS 'nullclaw 事件推送待处理队列：推送失败时暂存，后台重试';
