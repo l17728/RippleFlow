@@ -2271,10 +2271,28 @@ FAQ_SIMILARITY_CONFIG = {
 
 ## 21. FAQ 质量评估 Prompt（nullclaw Routine B 调用）
 
-> **触发场景**：每周一 09:00，nullclaw Routine B 对低质量 FAQ 进行批量评估  
+> **触发场景**：每周一 09:00，nullclaw Routine B 对低质量 FAQ 进行批量评估
 > **输入**：用户反馈为"答案有误"的 FAQ 条目 + 近期相关话题线索
 
-### 21.1 质量评估 Prompt
+### 21.1 质量状态机（平台自动触发）
+
+```
+normal ──(unhelpful_count≥2)──► suspicious ──(管理员处理)──► normal
+                                          └──(隔离)──────────► quarantined ──(恢复)──► normal
+normal ──(staleness_days超限)──► stale     ──(管理员更新)──► normal
+```
+
+平台在以下条件下自动写入 `faq_quality_alerts`，**无需 nullclaw 判断**：
+
+| 触发条件 | alert_type | quality_status 变化 |
+|----------|------------|---------------------|
+| `unhelpful_count ≥ 2` | `unhelpful_threshold` | normal → suspicious |
+| 30天内有查看但 helpful_count=0 | `zero_helpful_30d` | 不变 |
+| 超过 `staleness_days` 天未更新 | `stale_content` | normal → stale |
+| nullclaw 上报冲突 | `conflict_detected` | 不变 |
+| 管理员/nullclaw 手动标记 | `manual_flag` | 不变 |
+
+### 21.2 质量评估 Prompt
 
 ```python
 FAQ_QUALITY_ASSESSMENT_PROMPT = """
@@ -2315,19 +2333,24 @@ FAQ_QUALITY_ASSESSMENT_PROMPT = """
     "clarity": 4
   },
   "issues": ["具体问题描述1", "具体问题描述2"],
-  "recommendation": "keep | update | deprecate",
+  "recommendation": "keep | update | conflict_flag | deprecate",
   "suggested_update": {
     "answer": "更新后的答案（如果recommendation=update）",
     "reason": "更新原因"
-  }
+  },
+  "conflict_with": ["item_id_1"]
 }
 ```
 
 ## 判断标准
 
 - `overall_quality >= 4.0`：keep（保持现状）
-- `2.5 <= overall_quality < 4.0`：update（建议更新）
+- `2.5 <= overall_quality < 4.0`：update（建议更新，调用 update_item）
 - `overall_quality < 2.5`：deprecate（建议下架，标记为 rejected）
+- 与其他条目存在语义冲突：conflict_flag（调用 POST /api/v1/faq/alerts，alert_type=conflict_detected）
+
+> **注意**：nullclaw **不得**直接调用 quarantine_item。
+> 所有隔离操作须通过告警机制（manual_flag 或 conflict_detected）通知管理员处理。
 """
 ```
 

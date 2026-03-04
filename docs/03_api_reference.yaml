@@ -1133,6 +1133,96 @@ components:
       type: object
       properties:
 # ─────────────────────────────────────────────────────────────────────
+
+    FaqDocument:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        group_id: { type: string }
+        version: { type: integer }
+        qa_count: { type: integer }
+        updated_at: { type: string, format: date-time }
+
+    FaqSection:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        doc_id: { type: string, format: uuid }
+        parent_id: { type: string, format: uuid, nullable: true }
+        title: { type: string }
+        sort_order: { type: integer }
+        children:
+          type: array
+          items:
+            $ref: '#/components/schemas/FaqSection'
+
+    FaqItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        section_id: { type: string, format: uuid, nullable: true }
+        question: { type: string }
+        answer: { type: string }
+        question_variants:
+          type: array
+          items: { type: string }
+        source_threads:
+          type: array
+          items: { type: string, format: uuid }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        quality_score: { type: number, minimum: 0, maximum: 1, nullable: true, description: "综合质量分，NULL 表示未评估" }
+        view_count: { type: integer }
+        helpful_count: { type: integer }
+        unhelpful_count: { type: integer }
+        review_status:
+          type: string
+          enum: [pending, confirmed, rejected]
+        reviewed_by: { type: string, nullable: true }
+        reviewed_at: { type: string, format: date-time, nullable: true }
+        quality_status:
+          type: string
+          enum: [normal, suspicious, quarantined, stale]
+          description: "normal=正常; suspicious=疑似有误(unhelpful>=2); quarantined=已隔离; stale=内容可能过期"
+        quality_flagged_at: { type: string, format: date-time, nullable: true }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    FaqQualityAlert:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        item_id: { type: string, format: uuid }
+        item_question: { type: string, description: "冗余字段，方便展示" }
+        alert_type:
+          type: string
+          enum: [unhelpful_threshold, zero_helpful_30d, stale_content, conflict_detected, manual_flag]
+        triggered_by: { type: string, description: "'auto_rule' | user_id | 'nullclaw'" }
+        detail: { type: object, description: "告警时的上下文快照" }
+        status:
+          type: string
+          enum: [open, resolved, dismissed]
+        resolved_by: { type: string, nullable: true }
+        resolved_at: { type: string, format: date-time, nullable: true }
+        resolution_note: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    FaqVersion:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        item_id: { type: string, format: uuid }
+        version: { type: integer }
+        question: { type: string }
+        answer: { type: string }
+        change_type:
+          type: string
+          enum: [created, updated, merged, reviewed, rejected]
+        change_by: { type: string }
+        change_reason: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+
+# ─────────────────────────────────────────────────────────────────────
 security:
   - cookieAuth: []
 
@@ -4387,75 +4477,6 @@ paths:
           type: string
           format: date-time
         resolution:
-          type: string
-
-  # ─────────────────────────────────────────────────────────────────────
-  # FAQ 问答条目相关 Schema
-  # ─────────────────────────────────────────────────────────────────────
-
-    FaqDocument:
-      type: object
-      properties:
-        id: { type: string, format: uuid }
-        group_id: { type: string }
-        version: { type: integer }
-        qa_count: { type: integer }
-        updated_at: { type: string, format: date-time }
-
-    FaqSection:
-      type: object
-      properties:
-        id: { type: string, format: uuid }
-        doc_id: { type: string, format: uuid }
-        parent_id: { type: string, format: uuid, nullable: true }
-        title: { type: string }
-        sort_order: { type: integer }
-        children:
-          type: array
-          items:
-            $ref: '#/components/schemas/FaqSection'
-
-    FaqItem:
-      type: object
-      properties:
-        id: { type: string, format: uuid }
-        section_id: { type: string, format: uuid, nullable: true }
-        question: { type: string }
-        answer: { type: string }
-        question_variants:
-          type: array
-          items: { type: string }
-        source_threads:
-          type: array
-          items: { type: string, format: uuid }
-        confidence: { type: number, minimum: 0, maximum: 1 }
-        view_count: { type: integer }
-        helpful_count: { type: integer }
-        review_status:
-          type: string
-          enum: [pending, confirmed, rejected]
-        reviewed_by: { type: string, nullable: true }
-        reviewed_at: { type: string, format: date-time, nullable: true }
-        created_by: { type: string }
-        created_at: { type: string, format: date-time }
-        updated_at: { type: string, format: date-time }
-
-    FaqVersion:
-      type: object
-      properties:
-        id: { type: string, format: uuid }
-        item_id: { type: string, format: uuid }
-        version: { type: integer }
-        question: { type: string }
-        answer: { type: string }
-        change_type:
-          type: string
-          enum: [created, updated, merged, reviewed, rejected]
-        change_by: { type: string }
-        change_reason: { type: string, nullable: true }
-        created_at: { type: string, format: date-time }
-
-# ─────────────────────────────────────────────────────────────────────
 # FAQ API 端点
 # ─────────────────────────────────────────────────────────────────────
 
@@ -4800,3 +4821,129 @@ paths:
                 type: object
                 properties:
                   success: { type: boolean }
+
+  # ── FAQ 质量告警 ──────────────────────────────────────────────────────────
+
+  /api/v1/faq/alerts:
+    get:
+      tags: [faq]
+      summary: 获取 FAQ 质量告警列表（管理员）
+      description: |-
+        返回当前 open 状态的质量告警，供管理员处理。
+        **告警类型**：
+        - `unhelpful_threshold`：unhelpful_count ≥ 2，自动触发
+        - `zero_helpful_30d`：30天内有浏览但 helpful_count=0
+        - `stale_content`：超过 staleness_days 未更新
+        - `conflict_detected`：nullclaw 检测到答案与新消息冲突
+        - `manual_flag`：管理员/用户手工标记
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: group_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: status
+          schema: { type: string, enum: [open, resolved, dismissed], default: open }
+        - in: query
+          name: alert_type
+          schema:
+            type: string
+            enum: [unhelpful_threshold, zero_helpful_30d, stale_content, conflict_detected, manual_flag]
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: size
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          description: 告警列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer }
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FaqQualityAlert'
+
+  /api/v1/faq/alerts/{alert_id}/resolve:
+    post:
+      tags: [faq]
+      summary: 处理 FAQ 质量告警（管理员）
+      description: |-
+        处理一条质量告警，同时执行对应操作：
+        - `resolve_update`：更新 FAQ 答案后关闭告警
+        - `resolve_quarantine`：将 FAQ 隔离（普通用户不可见）后关闭告警
+        - `resolve_reject`：驳回 FAQ 后关闭告警
+        - `dismiss`：忽略本次告警（不修改 FAQ）
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: alert_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [resolve_update, resolve_quarantine, resolve_reject, dismiss]
+                note:
+                  type: string
+                  description: 处理说明
+                updated_answer:
+                  type: string
+                  description: 更新后的答案（action=resolve_update 时必填）
+      responses:
+        '200':
+          description: 告警处理成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FaqQualityAlert'
+
+  /api/v1/faq/items/{id}/quarantine:
+    post:
+      tags: [faq]
+      summary: 隔离 / 恢复 FAQ 条目（管理员）
+      description: |-
+        将 FAQ 质量状态设为 `quarantined`（对普通用户不可见），或从隔离中恢复为 `normal`。
+        隔离不等于驳回，隔离中的 FAQ 仍可被管理员查看和编辑。
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [quarantine, restore]
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: 操作成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FaqItem'

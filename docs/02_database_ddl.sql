@@ -2018,14 +2018,27 @@ CREATE TABLE faq_items (
     answer              TEXT NOT NULL,
     question_variants   TEXT[] DEFAULT '{}',
     source_threads      UUID[] DEFAULT '{}',         -- 关联 topic_threads.id 列表
-    confidence          REAL DEFAULT 0.8,
+    confidence          REAL DEFAULT 0.8,            -- AI 生成置信度 (0-1)
+    quality_score       REAL DEFAULT NULL,           -- 综合质量分 (0-1)，NULL=未评估
     view_count          INTEGER DEFAULT 0,
     helpful_count       INTEGER DEFAULT 0,
     unhelpful_count     INTEGER DEFAULT 0,
+    -- 审核状态
     review_status       VARCHAR(20) DEFAULT 'pending'
                         CHECK (review_status IN ('pending', 'confirmed', 'rejected')),
     reviewed_by         VARCHAR(255),
     reviewed_at         TIMESTAMPTZ,
+    -- 质量状态（独立于审核状态，运行时动态变化）
+    quality_status      VARCHAR(20) DEFAULT 'normal'
+                        CHECK (quality_status IN (
+                            'normal',       -- 正常
+                            'suspicious',   -- 疑似有误（自动触发：unhelpful_count >= 2）
+                            'quarantined',  -- 已隔离（暂时对普通用户不可见，等待核查）
+                            'stale'         -- 内容可能过期（超过 staleness_days 无更新）
+                        )),
+    quality_flagged_at  TIMESTAMPTZ,                 -- 进入 suspicious/quarantined 的时间
+    quality_flagged_by  VARCHAR(255),                -- 触发源：'auto_rule' | user_id
+    staleness_days      INTEGER DEFAULT 90,          -- 超过多少天未更新触发 stale 检测
     created_by          VARCHAR(255) DEFAULT 'nullclaw',
     created_at          TIMESTAMPTZ DEFAULT NOW(),
     updated_at          TIMESTAMPTZ DEFAULT NOW()
@@ -2034,10 +2047,43 @@ CREATE TABLE faq_items (
 CREATE INDEX idx_faq_items_doc ON faq_items(doc_id);
 CREATE INDEX idx_faq_items_section ON faq_items(section_id);
 CREATE INDEX idx_faq_items_status ON faq_items(review_status);
+CREATE INDEX idx_faq_items_quality ON faq_items(quality_status) WHERE quality_status != 'normal';
 CREATE INDEX idx_faq_items_search ON faq_items
     USING GIN(to_tsvector('simple', question || ' ' || answer));
+-- question_variants 全文索引（支持变体问法命中）
+CREATE INDEX idx_faq_items_variants ON faq_items USING GIN(question_variants);
 
-COMMENT ON TABLE faq_items IS 'FAQ 问答条目：pending 状态经管理员确认后对普通用户可见';
+COMMENT ON TABLE faq_items IS 'FAQ 问答条目：review_status 控制发布，quality_status 控制质量告警';
+COMMENT ON COLUMN faq_items.quality_score IS '综合质量分 = confirmed_ratio * 0.4 + helpful_ratio * 0.4 + (1-staleness_ratio) * 0.2';
+COMMENT ON COLUMN faq_items.quality_status IS 'suspicious: unhelpful>=2 自动触发; quarantined: 管理员或规则隔离; stale: 超期未更新';
+
+-- FAQ 质量告警记录
+-- 每次质量状态变更时写入，供管理员审查和 nullclaw Routine B 分析
+CREATE TABLE faq_quality_alerts (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    item_id         UUID NOT NULL REFERENCES faq_items(id) ON DELETE CASCADE,
+    alert_type      VARCHAR(50) NOT NULL
+                    CHECK (alert_type IN (
+                        'unhelpful_threshold',   -- unhelpful_count 触达阈值
+                        'zero_helpful_30d',      -- 30天内 helpful_count=0 且有浏览
+                        'stale_content',         -- 内容超期未更新
+                        'conflict_detected',     -- nullclaw 检测到与新消息冲突
+                        'manual_flag'            -- 管理员手工标记
+                    )),
+    triggered_by    VARCHAR(255),                -- 'auto_rule' | user_id | 'nullclaw'
+    detail          JSONB DEFAULT '{}',          -- 告警时的上下文快照（如 unhelpful_count 值）
+    status          VARCHAR(20) DEFAULT 'open'
+                    CHECK (status IN ('open', 'resolved', 'dismissed')),
+    resolved_by     VARCHAR(255),
+    resolved_at     TIMESTAMPTZ,
+    resolution_note TEXT,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_faq_alerts_item ON faq_quality_alerts(item_id);
+CREATE INDEX idx_faq_alerts_open ON faq_quality_alerts(status, created_at DESC) WHERE status = 'open';
+
+COMMENT ON TABLE faq_quality_alerts IS 'FAQ 质量告警：自动规则或手工触发，管理员处理后关闭';
 
 -- FAQ 变更历史（版本控制）
 CREATE TABLE faq_versions (

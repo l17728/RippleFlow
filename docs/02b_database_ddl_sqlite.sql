@@ -774,6 +774,7 @@ CREATE TABLE faq_items (
     question_variants TEXT DEFAULT '[]',             -- JSON 数组
     source_threads  TEXT DEFAULT '[]',               -- JSON 数组（topic_threads.id）
     confidence      REAL DEFAULT 0.8,
+    quality_score   REAL DEFAULT NULL,               -- 综合质量分，NULL=未评估
     view_count      INTEGER DEFAULT 0,
     helpful_count   INTEGER DEFAULT 0,
     unhelpful_count INTEGER DEFAULT 0,
@@ -781,6 +782,11 @@ CREATE TABLE faq_items (
                     CHECK (review_status IN ('pending', 'confirmed', 'rejected')),
     reviewed_by     TEXT,
     reviewed_at     TEXT,
+    quality_status  TEXT DEFAULT 'normal'
+                    CHECK (quality_status IN ('normal', 'suspicious', 'quarantined', 'stale')),
+    quality_flagged_at  TEXT,
+    quality_flagged_by  TEXT,
+    staleness_days  INTEGER DEFAULT 90,
     created_by      TEXT DEFAULT 'nullclaw',
     created_at      TEXT DEFAULT (datetime('now')),
     updated_at      TEXT DEFAULT (datetime('now'))
@@ -789,6 +795,31 @@ CREATE TABLE faq_items (
 CREATE INDEX idx_faq_items_doc ON faq_items(doc_id);
 CREATE INDEX idx_faq_items_section ON faq_items(section_id);
 CREATE INDEX idx_faq_items_status ON faq_items(review_status);
+CREATE INDEX idx_faq_items_quality ON faq_items(quality_status)
+    WHERE quality_status != 'normal';
+
+-- FAQ 质量告警（SQLite 版）
+CREATE TABLE faq_quality_alerts (
+    id              TEXT PRIMARY KEY,
+    item_id         TEXT NOT NULL REFERENCES faq_items(id) ON DELETE CASCADE,
+    alert_type      TEXT NOT NULL
+                    CHECK (alert_type IN (
+                        'unhelpful_threshold', 'zero_helpful_30d',
+                        'stale_content', 'conflict_detected', 'manual_flag'
+                    )),
+    triggered_by    TEXT,
+    detail          TEXT DEFAULT '{}',               -- JSON
+    status          TEXT DEFAULT 'open'
+                    CHECK (status IN ('open', 'resolved', 'dismissed')),
+    resolved_by     TEXT,
+    resolved_at     TEXT,
+    resolution_note TEXT,
+    created_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_faq_alerts_item ON faq_quality_alerts(item_id);
+CREATE INDEX idx_faq_alerts_open ON faq_quality_alerts(status, created_at)
+    WHERE status = 'open';
 
 CREATE TABLE faq_versions (
     id              TEXT PRIMARY KEY,

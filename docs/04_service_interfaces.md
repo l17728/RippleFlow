@@ -2232,17 +2232,71 @@ class IFaqService(Protocol):
     ) -> list[FaqVersionDTO]:
         """获取 FAQ 条目的完整变更历史，按版本号降序"""
         ...
+
+    # ── 质量保障（P0-1）──────────────────────────────────────────────────────
+
+    async def quarantine_item(
+        self,
+        item_id: UUID,
+        operator_id: str,
+        action: str,                      # quarantine | restore
+        reason: str = "",
+    ) -> FaqItemDTO:
+        """隔离或恢复 FAQ 条目
+
+        quarantine: quality_status → quarantined，对普通用户不可见
+        restore:    quality_status → normal，恢复可见
+        自动创建 faq_versions 快照（change_type=quality_quarantine/quality_restore）。
+        仅管理员可调用；nullclaw 不得直接调用。
+        """
+        ...
+
+    async def list_alerts(
+        self,
+        group_id: str,
+        status: str = "open",             # open | resolved | dismissed | all
+        alert_type: str | None = None,
+        page: int = 1,
+        size: int = 20,
+    ) -> tuple[list[FaqQualityAlertDTO], int]:
+        """获取 FAQ 质量告警列表（仅管理员调用）
+
+        告警由平台自动触发，条件：
+        - unhelpful_threshold：unhelpful_count ≥ 2，quality_status → suspicious
+        - zero_helpful_30d：30天内有查看但 helpful_count=0
+        - stale_content：staleness_days 天内未更新（默认90天）
+        - conflict_detected：nullclaw 检测到与其他条目语义冲突
+        - manual_flag：管理员或 nullclaw 手动标记
+        """
+        ...
+
+    async def resolve_alert(
+        self,
+        alert_id: UUID,
+        resolver_id: str,
+        action: str,                      # resolve_update | quarantine | reject | dismiss
+        resolution_note: str = "",
+    ) -> FaqQualityAlertDTO:
+        """处理质量告警
+
+        resolve_update: 条目已更新，告警 → resolved，quality_status → normal
+        quarantine:     条目隔离，告警 → resolved，调用 quarantine_item
+        reject:         条目废弃（review_status → rejected），告警 → resolved
+        dismiss:        忽略告警，告警 → dismissed，quality_status 不变
+        """
+        ...
 ```
 
 ### 接口约束说明
 
 | 约束 | 说明 |
 |------|------|
-| **权限隔离** | member 只能读取 `confirmed` 条目；admin 可读写全部 |
-| **版本快照** | `create_item`、`update_item`、`review_item`、`merge_items` 均自动写入 `faq_versions` |
-| **nullclaw 权限** | nullclaw 持有 `bot_token`，可调用 `create_item`、`update_item`、`merge_items` |
+| **权限隔离** | member 只能读取 `confirmed` 且 `quality_status != quarantined` 的条目 |
+| **版本快照** | `create_item`、`update_item`、`review_item`、`merge_items`、`quarantine_item` 均自动写入 `faq_versions` |
+| **nullclaw 权限** | nullclaw 持有 `bot_token`，可调用 `create_item`、`update_item`、`merge_items`；**不可**直接调用 `quarantine_item` |
 | **审核前不公开** | 默认 `pending`，管理员 `confirm` 后才对普通用户可见 |
 | **无向量检索** | `search` 方法使用全文检索（PostgreSQL FTS / SQLite FTS5），不使用 embedding |
+| **质量告警触发** | 平台自动监测（unhelpful/stale/conflict），告警写入 `faq_quality_alerts`，推送管理员 |
 
 ---
 
