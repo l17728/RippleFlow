@@ -54,6 +54,8 @@ tags:
     description: 内部服务接口（不对外暴露）
   - name: logs
     description: 日志上报与查询（客户端上报、异常监控、统计分析）
+  - name: faq
+    description: FAQ 知识库（群聊知识沉淀，由 nullclaw 自动生成与演进）
 
 # ─────────────────────────────────────────────────────────────────────
 # COMPONENTS
@@ -1131,6 +1133,9 @@ components:
       type: object
       properties:
 # ─────────────────────────────────────────────────────────────────────
+security:
+  - cookieAuth: []
+
 paths:
 
   # ════════════════════════════════════════════════════
@@ -3609,8 +3614,6 @@ paths:
                   knowledge_contributions: { type: integer }
                   tasks_completed: { type: integer }
 
-security:
-  - cookieAuth: []
 
   # ════════════════════════════════════════════════════
   # FILE SYSTEM (文件系统分级索引与存储)
@@ -4385,3 +4388,415 @@ security:
           format: date-time
         resolution:
           type: string
+
+  # ─────────────────────────────────────────────────────────────────────
+  # FAQ 问答条目相关 Schema
+  # ─────────────────────────────────────────────────────────────────────
+
+    FaqDocument:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        group_id: { type: string }
+        version: { type: integer }
+        qa_count: { type: integer }
+        updated_at: { type: string, format: date-time }
+
+    FaqSection:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        doc_id: { type: string, format: uuid }
+        parent_id: { type: string, format: uuid, nullable: true }
+        title: { type: string }
+        sort_order: { type: integer }
+        children:
+          type: array
+          items:
+            $ref: '#/components/schemas/FaqSection'
+
+    FaqItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        section_id: { type: string, format: uuid, nullable: true }
+        question: { type: string }
+        answer: { type: string }
+        question_variants:
+          type: array
+          items: { type: string }
+        source_threads:
+          type: array
+          items: { type: string, format: uuid }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        view_count: { type: integer }
+        helpful_count: { type: integer }
+        review_status:
+          type: string
+          enum: [pending, confirmed, rejected]
+        reviewed_by: { type: string, nullable: true }
+        reviewed_at: { type: string, format: date-time, nullable: true }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    FaqVersion:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        item_id: { type: string, format: uuid }
+        version: { type: integer }
+        question: { type: string }
+        answer: { type: string }
+        change_type:
+          type: string
+          enum: [created, updated, merged, reviewed, rejected]
+        change_by: { type: string }
+        change_reason: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+
+# ─────────────────────────────────────────────────────────────────────
+# FAQ API 端点
+# ─────────────────────────────────────────────────────────────────────
+
+  /api/v1/faq/{group_id}:
+    get:
+      tags: [faq]
+      summary: 获取群 FAQ 文档结构
+      description: |-
+        返回指定群聊的 FAQ 文档，包含完整章节树和基本统计信息。
+        **权限**：白名单用户（仅可见 `confirmed` 条目）；管理员可见全部。
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: group_id
+          required: true
+          schema: { type: string }
+          description: 群聊 ID
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [confirmed, pending, all]
+            default: confirmed
+          description: 过滤条目审核状态（非管理员强制 confirmed）
+      responses:
+        '200':
+          description: FAQ 文档结构
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  document:
+                    $ref: '#/components/schemas/FaqDocument'
+                  sections:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FaqSection'
+        '404':
+          description: 该群暂无 FAQ 文档
+
+  /api/v1/faq/{group_id}/items:
+    get:
+      tags: [faq]
+      summary: 分页获取 FAQ 条目
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: group_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: section_id
+          schema: { type: string, format: uuid }
+          description: 按章节筛选
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [confirmed, pending, all]
+            default: confirmed
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: size
+          schema: { type: integer, default: 20, maximum: 100 }
+      responses:
+        '200':
+          description: FAQ 条目列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer }
+                  page: { type: integer }
+                  size: { type: integer }
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FaqItem'
+
+  /api/v1/faq/{group_id}/search:
+    get:
+      tags: [faq]
+      summary: FAQ 全文搜索
+      description: 基于 PostgreSQL 全文索引搜索 FAQ 问题和答案。
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: group_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: q
+          required: true
+          schema: { type: string }
+          description: 搜索关键词
+        - in: query
+          name: size
+          schema: { type: integer, default: 10, maximum: 50 }
+      responses:
+        '200':
+          description: 搜索结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: { type: integer }
+                  source:
+                    type: string
+                    enum: [faq, fulltext]
+                    description: faq=命中 FAQ，fulltext=回退到全文检索
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FaqItem'
+
+  /api/v1/faq/items:
+    post:
+      tags: [faq]
+      summary: 创建 FAQ 条目
+      description: |-
+        由 nullclaw 调用，创建新 FAQ 草稿（status=pending）。
+        **权限**：内部服务 Token（nullclaw）或 admin。
+      security:
+        - botTokenAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [group_id, question, answer]
+              properties:
+                group_id: { type: string }
+                section_id: { type: string, format: uuid }
+                question: { type: string }
+                answer: { type: string }
+                question_variants:
+                  type: array
+                  items: { type: string }
+                source_threads:
+                  type: array
+                  items: { type: string, format: uuid }
+                confidence: { type: number, minimum: 0, maximum: 1 }
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FaqItem'
+
+  /api/v1/faq/items/{id}:
+    put:
+      tags: [faq]
+      summary: 更新 FAQ 条目
+      description: |-
+        更新已有 FAQ 内容（问题/答案/章节）。更新后自动写入 faq_versions。
+        **权限**：nullclaw 内部 Token 或 admin。
+      security:
+        - botTokenAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                question: { type: string }
+                answer: { type: string }
+                question_variants:
+                  type: array
+                  items: { type: string }
+                source_threads:
+                  type: array
+                  items: { type: string, format: uuid }
+                section_id: { type: string, format: uuid }
+                change_reason: { type: string }
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FaqItem'
+        '404':
+          description: 条目不存在
+
+  /api/v1/faq/items/{id}/review:
+    post:
+      tags: [faq]
+      summary: 审核 FAQ 条目
+      description: |-
+        管理员对 pending 条目进行审核（确认/修正/驳回）。
+        **权限**：admin 角色。
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [confirm, reject]
+                  description: confirm=确认发布，reject=驳回
+                edited_answer:
+                  type: string
+                  description: 管理员修正后的答案（action=confirm 时可选）
+                reject_reason:
+                  type: string
+                  description: 驳回原因（action=reject 时建议填写）
+      responses:
+        '200':
+          description: 审核完成
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FaqItem'
+        '403':
+          description: 无权限
+        '404':
+          description: 条目不存在
+
+  /api/v1/faq/items/merge:
+    post:
+      tags: [faq]
+      summary: 合并重复 FAQ 条目
+      description: |-
+        将多个相似条目合并为一个标准问答对，保留所有 source_threads 和 question_variants。
+        **权限**：nullclaw 内部 Token 或 admin。
+      security:
+        - botTokenAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_ids, target]
+              properties:
+                source_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+                  description: 待合并的条目 ID 列表（合并后删除）
+                target:
+                  type: object
+                  required: [question, answer]
+                  properties:
+                    question: { type: string }
+                    answer: { type: string }
+                    question_variants:
+                      type: array
+                      items: { type: string }
+                merge_reason: { type: string }
+      responses:
+        '200':
+          description: 合并成功，返回新条目
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FaqItem'
+
+  /api/v1/faq/items/{id}/versions:
+    get:
+      tags: [faq]
+      summary: 查看 FAQ 变更历史
+      description: 返回该条目的完整变更历史，支持回滚参考。
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 变更历史列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  item_id: { type: string, format: uuid }
+                  versions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FaqVersion'
+
+  /api/v1/faq/items/{id}/feedback:
+    post:
+      tags: [faq]
+      summary: 提交 FAQ 用户反馈
+      description: 用户对 FAQ 答案提交"有帮助"或"答案有误"反馈。
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type:
+                  type: string
+                  enum: [helpful, unhelpful]
+                comment:
+                  type: string
+                  description: 补充说明（unhelpful 时建议填写）
+      responses:
+        '200':
+          description: 反馈提交成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }

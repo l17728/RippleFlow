@@ -2050,3 +2050,287 @@ multi_step_indicators:
    - 预留缓冲时间
 """
 ```
+
+---
+
+## 19. FAQ 生成 Prompt（nullclaw 调用）
+
+> **触发场景**：nullclaw 接收到 `qa_faq` 类型话题线索事件后，决定将其转化为 FAQ 条目时调用。  
+> **调用方**：nullclaw AI 管家（非平台流水线）  
+> **模型**：GLM-4-Plus  
+> **输出**：结构化 FAQ 条目，写入 `POST /api/v1/faq/items`
+
+### 19.1 FAQ 生成 Prompt
+
+```python
+FAQ_GENERATION_PROMPT = """
+## 角色
+
+你是 nullclaw，一个负责知识沉淀的 AI 管家。你的任务是将一段群聊讨论提炼为标准 FAQ 条目。
+
+## 输入
+
+以下是一段被分类为 `qa_faq` 的群聊讨论摘要：
+
+<thread_summary>
+{thread_summary}
+</thread_summary>
+
+原始话题线索 ID：{thread_id}
+群聊名称：{group_name}
+
+## 现有相关 FAQ 条目
+
+以下是知识库中已有的相关条目（可能为空）：
+
+<existing_faqs>
+{existing_faqs_json}
+</existing_faqs>
+
+## 任务
+
+分析上述讨论，判断应执行以下哪种操作：
+
+1. **新建 FAQ**：这是一个全新问题，现有条目中没有覆盖
+2. **补充答案**：现有 FAQ 有相似问题，但本次讨论提供了更多信息
+3. **修正答案**：本次讨论的信息与现有 FAQ 存在矛盾，需要更新
+4. **无需操作**：讨论内容不适合转为 FAQ（如纯闲聊、一次性信息）
+
+## 输出要求
+
+请严格按照 JSON 格式输出：
+
+```json
+{
+  "action": "create | supplement | correct | skip",
+  "reason": "判断原因（1-2句话）",
+  "faq_item": {
+    "question": "标准问题表述（疑问句，简洁明确）",
+    "answer": "完整答案（Markdown 格式，包含关键细节）",
+    "question_variants": ["同义问法1", "同义问法2"],
+    "section_title": "建议归入的章节标题（如：环境配置、架构决策、故障排查）",
+    "confidence": 0.85,
+    "source_threads": ["{thread_id}"]
+  },
+  "existing_faq_id": "如果 action=supplement|correct，填写目标条目 ID，否则为 null"
+}
+```
+
+## 注意事项
+
+1. 问题表述要标准化，避免包含特定人名或时间
+2. 答案要完整自洽，读者无需查看原始讨论即可理解
+3. 如果讨论中有多个问题，选择最核心的一个生成 FAQ
+4. 置信度反映答案的完整性和准确性（0.7 以下建议人工审核）
+5. 敏感信息（密码、Token、个人信息）必须从答案中删除
+"""
+```
+
+### 19.2 调用配置
+
+```python
+FAQ_GENERATION_CONFIG = {
+    "model": "glm-4-plus",
+    "temperature": 0.3,  # 较低温度，确保输出结构化
+    "max_tokens": 1200,
+    "response_format": "json",
+    "timeout": 30,
+    "retry_times": 2
+}
+```
+
+### 19.3 调用示例
+
+```python
+# nullclaw Routine A 中的调用示例
+async def generate_faq_from_thread(thread_id: str, thread_summary: str):
+    # 1. 查询相关现有 FAQ
+    existing = await rf_client.search_faq(query=thread_summary[:100])
+    
+    # 2. 调用 LLM
+    result = await llm.call(
+        prompt=FAQ_GENERATION_PROMPT.format(
+            thread_summary=thread_summary,
+            thread_id=thread_id,
+            group_name=group_name,
+            existing_faqs_json=json.dumps(existing[:5], ensure_ascii=False)
+        ),
+        config=FAQ_GENERATION_CONFIG
+    )
+    
+    # 3. 根据 action 调用 RippleFlow API
+    if result["action"] == "create":
+        await rf_client.post("/api/v1/faq/items", json={
+            **result["faq_item"],
+            "review_status": "pending"
+        })
+    elif result["action"] in ("supplement", "correct"):
+        await rf_client.put(
+            f"/api/v1/faq/items/{result['existing_faq_id']}",
+            json=result["faq_item"]
+        )
+    # skip: 不操作
+```
+
+---
+
+## 20. FAQ 相似度判断 Prompt（nullclaw 调用）
+
+> **触发场景**：用户发起问答请求时，判断用户问题与已有 FAQ 的匹配程度，实现 FAQ 优先回答逻辑。  
+> **调用方**：nullclaw AI 管家（不是 RippleFlow 平台，平台不含此业务逻辑）  
+> **注意**：RippleFlow 不使用向量数据库，相似度判断由 LLM 完成
+
+### 20.1 FAQ 相似度判断 Prompt
+
+```python
+FAQ_SIMILARITY_PROMPT = """
+## 任务
+
+判断用户问题与以下 FAQ 条目的相关性，实现精准的知识库匹配。
+
+## 用户问题
+
+{user_question}
+
+## 候选 FAQ 条目
+
+{candidate_faqs_json}
+
+## 输出要求
+
+请按相关性从高到低排列，只输出相关性 > 0.5 的条目：
+
+```json
+{
+  "matches": [
+    {
+      "faq_id": "条目ID",
+      "similarity": 0.95,
+      "match_type": "exact | semantic | partial",
+      "reason": "匹配原因（一句话）"
+    }
+  ],
+  "top_match": {
+    "faq_id": "最佳匹配ID（如无则为null）",
+    "similarity": 0.95,
+    "should_answer_directly": true
+  }
+}
+```
+
+## 匹配类型说明
+
+- **exact**：问题与 FAQ 标准问法或变体完全一致（similarity > 0.9）
+- **semantic**：语义相近，答案可以直接使用（similarity 0.7-0.9）
+- **partial**：部分相关，答案可作为参考（similarity 0.5-0.7）
+
+## 注意
+
+- `should_answer_directly = true` 的条件：similarity > 0.7 且 match_type 为 exact 或 semantic
+- 如果 `matches` 为空，返回空数组，表示需要走 LLM 全量检索
+"""
+```
+
+### 20.2 调用配置
+
+```python
+FAQ_SIMILARITY_CONFIG = {
+    "model": "glm-4-plus",
+    "temperature": 0.1,  # 极低温度，确保判断稳定
+    "max_tokens": 600,
+    "response_format": "json",
+    "timeout": 15  # 要求快速响应
+}
+```
+
+### 20.3 问答流程集成
+
+```
+用户问题到达 nullclaw
+    ↓
+阶段1：检索候选 FAQ（GET /api/v1/faq/{group_id}/search?q=...&limit=10）
+    ↓
+阶段2：调用 FAQ 相似度判断 Prompt（输入：用户问题 + 候选 FAQ 列表）
+    ↓
+解析 top_match：
+    ├─ similarity > 0.9 → 直接返回 FAQ 答案（source: "faq_exact"）
+    ├─ 0.7-0.9 → 返回 FAQ 答案 + "是否为您要找的问题？"（source: "faq_semantic"）
+    └─ < 0.7 → 走原有全量检索 + LLM 综合回答（source: "llm_generated"）
+```
+
+### 20.4 性能优化说明
+
+| 阶段 | 方式 | 目标延迟 |
+|------|------|---------|
+| FAQ 检索（阶段1） | PostgreSQL 全文索引 | < 50ms |
+| 相似度判断（阶段2） | LLM 调用（最多10条 FAQ） | < 800ms |
+| 直接返回 FAQ | 缓存命中 | < 100ms |
+| LLM 综合回答 | GLM-4-Plus 生成 | < 3s |
+
+---
+
+## 21. FAQ 质量评估 Prompt（nullclaw Routine B 调用）
+
+> **触发场景**：每周一 09:00，nullclaw Routine B 对低质量 FAQ 进行批量评估  
+> **输入**：用户反馈为"答案有误"的 FAQ 条目 + 近期相关话题线索
+
+### 21.1 质量评估 Prompt
+
+```python
+FAQ_QUALITY_ASSESSMENT_PROMPT = """
+## 角色
+
+你是 nullclaw，负责维护知识库质量。请对以下 FAQ 条目进行质量评估。
+
+## 待评估的 FAQ 条目
+
+{faq_item_json}
+
+## 用户反馈记录
+
+{user_feedback_list}
+
+## 近期相关讨论（可能包含更新信息）
+
+{recent_threads_json}
+
+## 评估维度
+
+请从以下维度评分（1-5分）：
+
+1. **准确性**：答案是否正确、无误导性内容
+2. **完整性**：是否覆盖了问题的关键方面
+3. **时效性**：信息是否仍然适用（技术栈/配置可能已更新）
+4. **清晰度**：答案是否易于理解
+
+## 输出要求
+
+```json
+{
+  "overall_quality": 3.5,
+  "dimensions": {
+    "accuracy": 4,
+    "completeness": 3,
+    "timeliness": 3,
+    "clarity": 4
+  },
+  "issues": ["具体问题描述1", "具体问题描述2"],
+  "recommendation": "keep | update | deprecate",
+  "suggested_update": {
+    "answer": "更新后的答案（如果recommendation=update）",
+    "reason": "更新原因"
+  }
+}
+```
+
+## 判断标准
+
+- `overall_quality >= 4.0`：keep（保持现状）
+- `2.5 <= overall_quality < 4.0`：update（建议更新）
+- `overall_quality < 2.5`：deprecate（建议下架，标记为 rejected）
+"""
+```
+
+---
+
+*本文档 §19–21 由 nullclaw 调用，属于 AI 管家侧的知识运营策略，不在 RippleFlow 平台流水线（Stage 0–4）范围内。*

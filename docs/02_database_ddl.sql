@@ -1978,5 +1978,85 @@ CREATE INDEX idx_file_access_time ON file_access_logs(accessed_at DESC);
 COMMENT ON TABLE file_access_logs IS '文件访问日志：记录文件访问行为，用于访问频率统计';
 
 -- =============================================================
+-- FAQ 知识库系统（群聊知识沉淀）
+-- =============================================================
+
+-- FAQ 文档元数据（每群一份）
+CREATE TABLE faq_documents (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    group_id        VARCHAR(255) NOT NULL UNIQUE,   -- chat_rooms.room_id
+    version         INTEGER DEFAULT 0,               -- 更新版本号
+    qa_count        INTEGER DEFAULT 0,               -- 已确认的 FAQ 条目数
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+COMMENT ON TABLE faq_documents IS 'FAQ 文档元数据：每个群聊对应一份，由 nullclaw 维护';
+
+-- FAQ 章节（动态维护，由 nullclaw 自动调整结构）
+CREATE TABLE faq_sections (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    doc_id          UUID NOT NULL REFERENCES faq_documents(id) ON DELETE CASCADE,
+    parent_id       UUID REFERENCES faq_sections(id) ON DELETE CASCADE,
+    title           VARCHAR(200) NOT NULL,
+    sort_order      INTEGER DEFAULT 0,
+    created_by      VARCHAR(255) DEFAULT 'nullclaw',
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_faq_sections_doc ON faq_sections(doc_id);
+CREATE INDEX idx_faq_sections_parent ON faq_sections(parent_id);
+
+COMMENT ON TABLE faq_sections IS 'FAQ 章节：目录结构由 nullclaw 根据内容聚类自动维护';
+
+-- FAQ 问答条目
+CREATE TABLE faq_items (
+    id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    section_id          UUID REFERENCES faq_sections(id) ON DELETE SET NULL,
+    doc_id              UUID NOT NULL REFERENCES faq_documents(id) ON DELETE CASCADE,
+    question            TEXT NOT NULL,
+    answer              TEXT NOT NULL,
+    question_variants   TEXT[] DEFAULT '{}',
+    source_threads      UUID[] DEFAULT '{}',         -- 关联 topic_threads.id 列表
+    confidence          REAL DEFAULT 0.8,
+    view_count          INTEGER DEFAULT 0,
+    helpful_count       INTEGER DEFAULT 0,
+    unhelpful_count     INTEGER DEFAULT 0,
+    review_status       VARCHAR(20) DEFAULT 'pending'
+                        CHECK (review_status IN ('pending', 'confirmed', 'rejected')),
+    reviewed_by         VARCHAR(255),
+    reviewed_at         TIMESTAMPTZ,
+    created_by          VARCHAR(255) DEFAULT 'nullclaw',
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_faq_items_doc ON faq_items(doc_id);
+CREATE INDEX idx_faq_items_section ON faq_items(section_id);
+CREATE INDEX idx_faq_items_status ON faq_items(review_status);
+CREATE INDEX idx_faq_items_search ON faq_items
+    USING GIN(to_tsvector('simple', question || ' ' || answer));
+
+COMMENT ON TABLE faq_items IS 'FAQ 问答条目：pending 状态经管理员确认后对普通用户可见';
+
+-- FAQ 变更历史（版本控制）
+CREATE TABLE faq_versions (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    item_id         UUID NOT NULL REFERENCES faq_items(id) ON DELETE CASCADE,
+    version         INTEGER NOT NULL,
+    question        TEXT,
+    answer          TEXT,
+    change_type     VARCHAR(50) NOT NULL
+                    CHECK (change_type IN ('created', 'updated', 'merged', 'reviewed', 'rejected')),
+    change_by       VARCHAR(255),
+    change_reason   TEXT,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_faq_versions_item ON faq_versions(item_id, version DESC);
+
+COMMENT ON TABLE faq_versions IS 'FAQ 变更历史：记录每次修改，支持回滚';
+
+-- =============================================================
 -- END OF DDL
 -- =============================================================

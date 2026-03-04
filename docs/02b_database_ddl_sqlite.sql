@@ -740,5 +740,71 @@ JOIN chat_users v ON cr.user_id_b = v.ldap_user_id
 ORDER BY cr.weight DESC;
 
 -- =============================================================
+-- FAQ 知识库系统（群聊知识沉淀）
+-- =============================================================
+
+CREATE TABLE faq_documents (
+    id              TEXT PRIMARY KEY,                -- UUID 字符串
+    group_id        TEXT NOT NULL UNIQUE,
+    version         INTEGER DEFAULT 0,
+    qa_count        INTEGER DEFAULT 0,
+    created_at      TEXT DEFAULT (datetime('now')),
+    updated_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE faq_sections (
+    id              TEXT PRIMARY KEY,
+    doc_id          TEXT NOT NULL REFERENCES faq_documents(id) ON DELETE CASCADE,
+    parent_id       TEXT REFERENCES faq_sections(id) ON DELETE CASCADE,
+    title           TEXT NOT NULL,
+    sort_order      INTEGER DEFAULT 0,
+    created_by      TEXT DEFAULT 'nullclaw',
+    updated_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_faq_sections_doc ON faq_sections(doc_id);
+CREATE INDEX idx_faq_sections_parent ON faq_sections(parent_id);
+
+CREATE TABLE faq_items (
+    id              TEXT PRIMARY KEY,
+    section_id      TEXT REFERENCES faq_sections(id) ON DELETE SET NULL,
+    doc_id          TEXT NOT NULL REFERENCES faq_documents(id) ON DELETE CASCADE,
+    question        TEXT NOT NULL,
+    answer          TEXT NOT NULL,
+    question_variants TEXT DEFAULT '[]',             -- JSON 数组
+    source_threads  TEXT DEFAULT '[]',               -- JSON 数组（topic_threads.id）
+    confidence      REAL DEFAULT 0.8,
+    view_count      INTEGER DEFAULT 0,
+    helpful_count   INTEGER DEFAULT 0,
+    unhelpful_count INTEGER DEFAULT 0,
+    review_status   TEXT DEFAULT 'pending'
+                    CHECK (review_status IN ('pending', 'confirmed', 'rejected')),
+    reviewed_by     TEXT,
+    reviewed_at     TEXT,
+    created_by      TEXT DEFAULT 'nullclaw',
+    created_at      TEXT DEFAULT (datetime('now')),
+    updated_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_faq_items_doc ON faq_items(doc_id);
+CREATE INDEX idx_faq_items_section ON faq_items(section_id);
+CREATE INDEX idx_faq_items_status ON faq_items(review_status);
+
+CREATE TABLE faq_versions (
+    id              TEXT PRIMARY KEY,
+    item_id         TEXT NOT NULL REFERENCES faq_items(id) ON DELETE CASCADE,
+    version         INTEGER NOT NULL,
+    question        TEXT,
+    answer          TEXT,
+    change_type     TEXT NOT NULL
+                    CHECK (change_type IN ('created', 'updated', 'merged', 'reviewed', 'rejected')),
+    change_by       TEXT,
+    change_reason   TEXT,
+    created_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_faq_versions_item ON faq_versions(item_id, version DESC);
+
+-- =============================================================
 -- END OF DDL
 -- =============================================================
