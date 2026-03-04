@@ -2357,3 +2357,51 @@ FAQ_QUALITY_ASSESSMENT_PROMPT = """
 ---
 
 *本文档 §19–21 由 nullclaw 调用，属于 AI 管家侧的知识运营策略，不在 RippleFlow 平台流水线（Stage 0–4）范围内。*
+
+---
+
+## 22. Stage 2 批量分类 Prompt（P1-1 LLM 成本优化）
+
+> **用途**：将积压消息批量（最多10条）合并为单次 LLM 调用，减少 Stage 2 调用次数约 40-60%。
+> **触发条件**：积压 ≥ 3 条消息，或等待超过 2 秒强制触发。
+
+```python
+STAGE2_BATCH_CLASSIFY_PROMPT = """
+## 任务
+
+对以下 {count} 条群聊消息进行多标签分类。
+
+## 消息列表
+
+{messages_json}
+格式：[{"idx": 0, "content": "..."}]
+
+## 分类标签（可多选）
+
+{categories_list}
+格式：[{"key": "tech_decision", "description": "技术决策讨论..."}]
+
+## 输出要求
+
+返回 JSON 数组，每条消息对应一个结果：
+
+```json
+[
+  {
+    "idx": 0,
+    "categories": [
+      {"category": "tech_decision", "confidence": 0.85},
+      {"category": "qa_faq", "confidence": 0.65}
+    ]
+  }
+]
+```
+
+规则：
+- 只返回 confidence >= 0.6 的类别
+- 若无符合类别，返回空数组 []
+- 严格按 idx 顺序输出，不得遗漏任何 idx
+"""
+```
+
+*本文档 §22 用于平台 Stage 2 批量分类，属于成本优化策略，与 §19–21 的 nullclaw 侧调用无关。*

@@ -861,3 +861,43 @@ CREATE TABLE nullclaw_pending_events (
 CREATE INDEX idx_pending_events_retry ON nullclaw_pending_events (next_retry_at)
     WHERE status = 'pending';
 CREATE INDEX idx_pending_events_status ON nullclaw_pending_events (status, created_at DESC);
+
+-- =============================================================
+-- 消息处理死信队列（P1-2）
+-- =============================================================
+
+CREATE TABLE failed_messages (
+    id              TEXT PRIMARY KEY,            -- 应用层生成 UUID
+    message_id      TEXT REFERENCES messages(id) ON DELETE SET NULL,
+    failed_stage    TEXT NOT NULL
+                    CHECK (failed_stage IN ('stage0','stage1','stage2','stage3','stage4')),
+    error_type      TEXT NOT NULL
+                    CHECK (error_type IN ('llm_timeout','llm_error','parse_error','business_error','unknown')),
+    error_detail    TEXT,
+    retry_count     INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending','retrying','resolved','skipped')),
+    resolved_by     TEXT,
+    resolved_at     TEXT,                        -- ISO8601
+    resolution_note TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_failed_messages_status ON failed_messages (status, created_at DESC);
+CREATE INDEX idx_failed_messages_message ON failed_messages (message_id);
+
+-- =============================================================
+-- 数据归档字段（P2-1）
+-- =============================================================
+
+-- SQLite 不支持 ALTER TABLE ADD COLUMN 带 CHECK 约束，用新表迁移方式在实现层处理
+-- 此处记录目标列定义供参考（实现时通过迁移脚本完成）
+
+-- topic_threads 目标新增列：
+--   archive_status TEXT NOT NULL DEFAULT 'active' CHECK (archive_status IN ('active','archived_l2','archived_l3'))
+--   archived_at    TEXT   -- ISO8601
+--   archive_path   TEXT
+
+-- messages 目标新增列：
+--   archive_status   TEXT NOT NULL DEFAULT 'active' CHECK (archive_status IN ('active','archived'))
+--   content_archived INTEGER NOT NULL DEFAULT 0  -- SQLite 无 BOOLEAN，用 0/1

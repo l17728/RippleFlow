@@ -305,6 +305,45 @@ class IProcessingPipelineService(Protocol):
         漂移检测：追加冲突说明（Append-Only）。
         """
         ...
+
+    # ── 死信队列（P1-2）──────────────────────────────────────────────────────
+
+    async def move_to_dlq(
+        self,
+        message_id: UUID,
+        failed_stage: str,
+        error_type: str,
+        error_detail: str,
+        retry_count: int,
+    ) -> None:
+        """消息重试耗尽后写入 failed_messages 死信队列，并推送管理员告警"""
+        ...
+
+    async def list_failed_messages(
+        self,
+        status: str = "pending",
+        page: int = 1,
+        size: int = 20,
+    ) -> tuple[list[dict], int]:
+        """获取死信队列列表（管理员 Dashboard 使用）"""
+        ...
+
+    async def retry_failed_message(
+        self,
+        failed_id: UUID,
+        operator_id: str,
+    ) -> None:
+        """管理员触发重新处理：消息重新入高优先级队列，status → 'retrying'"""
+        ...
+
+    async def skip_failed_message(
+        self,
+        failed_id: UUID,
+        operator_id: str,
+        note: str = "",
+    ) -> None:
+        """管理员跳过失败消息：status → 'skipped'，不再处理"""
+        ...
 ```
 
 ---

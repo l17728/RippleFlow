@@ -2131,3 +2131,55 @@ CREATE INDEX idx_pending_events_retry ON nullclaw_pending_events (next_retry_at)
 CREATE INDEX idx_pending_events_status ON nullclaw_pending_events (status, created_at DESC);
 
 COMMENT ON TABLE nullclaw_pending_events IS 'nullclaw 事件推送待处理队列：推送失败时暂存，后台重试';
+
+-- =============================================================
+-- 消息处理死信队列（P1-2）
+-- =============================================================
+
+CREATE TABLE failed_messages (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    message_id      UUID REFERENCES messages(id) ON DELETE SET NULL,
+    failed_stage    VARCHAR(20) NOT NULL
+                    CHECK (failed_stage IN ('stage0','stage1','stage2','stage3','stage4')),
+    error_type      VARCHAR(50) NOT NULL
+                    CHECK (error_type IN ('llm_timeout','llm_error','parse_error','business_error','unknown')),
+    error_detail    TEXT,
+    retry_count     INTEGER NOT NULL DEFAULT 0,
+    status          VARCHAR(20) NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending','retrying','resolved','skipped')),
+    resolved_by     VARCHAR(255),
+    resolved_at     TIMESTAMPTZ,
+    resolution_note TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_failed_messages_status ON failed_messages (status, created_at DESC);
+CREATE INDEX idx_failed_messages_message ON failed_messages (message_id);
+
+COMMENT ON TABLE failed_messages IS '消息处理死信队列：3次重试耗尽后写入，供管理员人工处理';
+
+-- =============================================================
+-- 数据归档字段（P2-1）
+-- =============================================================
+
+-- topic_threads 归档状态
+ALTER TABLE topic_threads
+    ADD COLUMN archive_status VARCHAR(20) NOT NULL DEFAULT 'active'
+        CHECK (archive_status IN ('active','archived_l2','archived_l3')),
+    ADD COLUMN archived_at    TIMESTAMPTZ,
+    ADD COLUMN archive_path   TEXT;
+
+CREATE INDEX idx_threads_archive ON topic_threads (archive_status, last_message_at)
+    WHERE archive_status = 'active';
+
+-- messages 归档状态
+ALTER TABLE messages
+    ADD COLUMN archive_status   VARCHAR(20) NOT NULL DEFAULT 'active'
+        CHECK (archive_status IN ('active','archived')),
+    ADD COLUMN content_archived BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE INDEX idx_messages_archive ON messages (archive_status)
+    WHERE archive_status = 'archived';
+
+COMMENT ON COLUMN topic_threads.archive_status IS 'L1=active，L2=archived_l2，L3=archived_l3';
+COMMENT ON COLUMN messages.content_archived IS 'TRUE表示消息正文已移至对象存储，DB仅保留元数据';
