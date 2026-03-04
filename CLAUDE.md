@@ -118,4 +118,11 @@ zig fmt src/                         # format source
 
 ## Language
 
-Documentation is primarily in Chinese. Code comments and API names in English.
+- **与用户交流**：默认使用中文（简体）回复，除非涉及纯英文代码或文档
+- Documentation is primarily in Chinese. Code comments and API names in English.
+
+## Workflow（工作流约定）
+
+- **收到"继续"时**：先用 `TaskList` 检查未完成任务，或查看最近 `git log --oneline -5` 了解进度，直接接续未完成的工作，无需询问
+- **多步骤任务**：每完成一个子任务后立即 commit（`feat:/fix:/docs:` 前缀），再继续下一个，确保中断后工作不丢失
+- **任务追踪**：对于 3 步以上的任务使用 TaskCreate/TaskUpdate 拆分子任务并跟踪进度
