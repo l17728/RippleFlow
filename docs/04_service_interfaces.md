@@ -1690,4 +1690,304 @@ PersonalTodoService
     ├── NotificationService
     ├── SubscriptionService
     └── AuthService
+
+LogService
+    ├── NotificationService
+    └── AIButlerService
+
+ExceptionNotificationService
+    ├── LogService
+    ├── NotificationService
+    └── AIButlerService
+```
+
+---
+
+## 17. LogService（日志服务 - 新增）
+
+```python
+class LogEntry(TypedDict):
+    """日志条目"""
+    id: str                      # 日志 ID
+    timestamp: str               # ISO8601 时间戳
+    level: str                   # DEBUG | INFO | WARNING | ERROR | CRITICAL
+    category: str                # api_access | business | llm | exception | audit | client
+    service: str                 # 服务名称
+    message: str                 # 日志消息
+    details: dict                # 详细信息
+    request_id: str | None       # 请求 ID
+    user_id: str | None          # 用户 ID
+    session_id: str | None       # 会话 ID
+    client_ip: str | None        # 客户端 IP
+    duration_ms: int | None      # 耗时（毫秒）
+    exception_type: str | None   # 异常类型
+    stack_trace: str | None      # 堆栈信息
+
+
+class ExceptionEvent(TypedDict):
+    """异常事件"""
+    id: str
+    timestamp: str
+    severity: str                # critical | error | warning
+    exception_type: str
+    exception_message: str
+    stack_trace: str
+    context: dict
+    request_id: str | None
+    user_id: str | None
+    affected_count: int          # 影响次数
+    first_occurred: str
+    last_occurred: str
+    status: str                  # new | acknowledged | resolved
+
+
+class ILogService(Protocol):
+    """
+    日志服务。
+    负责日志采集、存储、查询和异常检测。
+    """
+
+    async def write_log(
+        self,
+        level: str,
+        category: str,
+        service: str,
+        message: str,
+        details: dict | None = None,
+        request_id: str | None = None,
+        user_id: str | None = None,
+    ) -> str:
+        """
+        写入日志条目。
+        返回日志 ID。
+        """
+        ...
+
+    async def write_exception(
+        self,
+        exception: Exception,
+        context: dict | None = None,
+        request_id: str | None = None,
+        user_id: str | None = None,
+    ) -> str:
+        """
+        写入异常日志。
+        自动提取异常类型、消息和堆栈。
+        返回日志 ID。
+        """
+        ...
+
+    async def search_logs(
+        self,
+        start_time: str,
+        end_time: str,
+        level: str | None = None,
+        category: str | None = None,
+        service: str | None = None,
+        request_id: str | None = None,
+        user_id: str | None = None,
+        keyword: str | None = None,
+        page: int = 1,
+        size: int = 50,
+    ) -> tuple[list[LogEntry], int]:
+        """
+        搜索日志。
+        返回 (日志列表, 总数)。
+        """
+        ...
+
+    async def get_exception_events(
+        self,
+        status: str | None = None,
+        severity: str | None = None,
+        since: str | None = None,
+    ) -> list[ExceptionEvent]:
+        """
+        获取异常事件列表。
+        用于异常监控面板。
+        """
+        ...
+
+    async def acknowledge_exception(
+        self,
+        exception_id: str,
+        acknowledged_by: str,
+        note: str | None = None,
+    ) -> None:
+        """
+        确认异常（标记为已知）。
+        """
+        ...
+
+    async def resolve_exception(
+        self,
+        exception_id: str,
+        resolved_by: str,
+        resolution: str,
+    ) -> None:
+        """
+        解决异常（标记为已修复）。
+        """
+        ...
+
+    async def get_log_statistics(
+        self,
+        start_time: str,
+        end_time: str,
+        group_by: str = 'category',  # category | level | service | hour
+    ) -> dict:
+        """
+        获取日志统计。
+        用于监控面板。
+        """
+        ...
+```
+
+---
+
+## 18. ExceptionNotificationService（异常通知服务 - 新增）
+
+```python
+class NotificationChannel(TypedDict):
+    """通知通道配置"""
+    type: str                    # email | webhook
+    enabled: bool
+    recipients: list[str]        # Email 地址列表 或 Webhook URL
+    template: str                # 模板名称
+    cooldown_seconds: int        # 冷却时间（同一异常）
+
+
+class IExceptionNotificationService(Protocol):
+    """
+    异常通知服务。
+    负责检测异常并通知 AI 管家，由 AI 管家决定通知渠道。
+    """
+
+    async def detect_exceptions(self) -> list[ExceptionEvent]:
+        """
+        检测新异常。
+        基于预定义规则检测异常事件。
+        返回需要处理的异常列表。
+        """
+        ...
+
+    async def notify_butler(
+        self,
+        exception: ExceptionEvent,
+    ) -> None:
+        """
+        通知 AI 管家有新异常。
+        AI 管家根据异常严重程度决定通知策略。
+        """
+        ...
+
+    async def send_email_notification(
+        self,
+        exception: ExceptionEvent,
+        recipients: list[str],
+    ) -> bool:
+        """
+        发送 Email 通知给管理员。
+        返回是否发送成功。
+        """
+        ...
+
+    async def send_webhook_notification(
+        self,
+        exception: ExceptionEvent,
+        webhook_url: str,
+    ) -> bool:
+        """
+        发送 Webhook 通知给 nullclaw 自动开发团队。
+        返回是否发送成功。
+        """
+        ...
+
+    async def get_notification_history(
+        self,
+        exception_id: str,
+    ) -> list[dict]:
+        """
+        获取异常的通知历史。
+        """
+        ...
+
+    async def should_notify(
+        self,
+        exception: ExceptionEvent,
+        channel: NotificationChannel,
+    ) -> bool:
+        """
+        判断是否应该发送通知。
+        检查冷却时间、已确认状态等。
+        """
+        ...
+```
+
+---
+
+## 19. 配置项定义（新增）
+
+```python
+class LogConfig(TypedDict):
+    """日志配置"""
+    level: str                   # DEBUG | INFO | WARNING | ERROR | CRITICAL
+    format: str                  # json | text
+    path: str                    # 日志文件路径
+    max_file_size_mb: int        # 单文件最大大小
+    max_backup_count: int        # 备份文件数量
+    retention_days: int          # 保留天数
+
+    # 分类配置
+    categories: dict[str, dict]  # 各分类的具体配置
+
+    # 异常检测
+    exception_detection: dict
+
+    # 通知配置
+    notification: "NotificationConfig"
+
+
+class NotificationConfig(TypedDict):
+    """通知配置"""
+    # Email 配置
+    email: dict[str, Any]
+    # 管理员邮箱列表
+    admin_emails: list[str]
+    # SMTP 配置
+    smtp: dict[str, str]
+
+    # Webhook 配置
+    webhook: dict[str, Any]
+    # nullclaw 开发团队 Webhook
+    dev_channel_webhook: str
+
+    # 冷却时间
+    cooldown_seconds: int
+```
+
+---
+
+## 20. 接口依赖关系图（最终版）
+
+```
+LogService
+    ├── NotificationService
+    └── AIButlerService
+
+ExceptionNotificationService
+    ├── LogService
+    ├── NotificationService
+    └── AIButlerService
+
+AIButlerService
+    ├── LogService              ← 新增
+    ├── ExceptionNotificationService  ← 新增
+    ├── LLMService
+    ├── ThreadService
+    ├── NotificationService
+    ├── FeedbackService
+    ├── PersonalTodoService
+    ├── SubscriptionService
+    └── AuthService
 ```

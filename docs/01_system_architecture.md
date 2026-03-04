@@ -988,6 +988,477 @@ P2 - 一般 (1天内响应):
   - 孤儿话题增多: threads_orphan_count > 20
 ```
 
+### 15.4 日志系统架构（新增）
+
+RippleFlow 采用**分层日志架构**，支持异常自动检测与智能通知。
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    RippleFlow 日志系统架构                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                日志采集层                                │   │
+│  │                                                         │   │
+│  │  服务端日志                    客户端日志                │   │
+│  │  ├── API 访问日志             ├── 前端错误日志           │   │
+│  │  ├── 业务处理日志             ├── 用户行为日志           │   │
+│  │  ├── LLM 调用日志             ├── 性能指标日志           │   │
+│  │  ├── 异常堆栈日志             ├── 网络请求日志           │   │
+│  │  └── 审计日志                 └── 控制台日志             │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                              │                                  │
+│                              ▼                                  │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                日志处理层                                │   │
+│  │                                                         │   │
+│  │  结构化存储        实时分析        异常检测              │   │
+│  │  ├── JSON 格式    ├── 关键词匹配   ├── 错误率监控        │   │
+│  │  ├── 时间索引     ├── 模式识别     ├── 异常聚合          │   │
+│  │  └── 分级存储     └── 趋势分析     └── 根因定位          │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                              │                                  │
+│                              ▼                                  │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                通知分发层                                │   │
+│  │                                                         │   │
+│  │  AI 管家接收异常事件                                     │   │
+│  │        │                                                │   │
+│  │        ├──→ Email 通知人类管理员                         │   │
+│  │        │    └── 配置: admin_emails: [...]               │   │
+│  │        │                                                │   │
+│  │        └──→ 消息通道通知 nullclaw 自动开发团队            │   │
+│  │             └── 配置: dev_channel_webhook: "..."        │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 15.4.1 服务端日志规范
+
+```yaml
+# 日志级别定义
+LOG_LEVELS:
+  DEBUG:    # 开发调试信息（生产环境关闭）
+  INFO:     # 正常业务流程
+  WARNING:  # 潜在问题，不影响服务
+  ERROR:    # 错误，需要关注
+  CRITICAL: # 严重错误，需要立即处理
+
+# 日志分类
+LOG_CATEGORIES:
+  # API 访问日志
+  api_access:
+    format: json
+    fields:
+      - timestamp
+      - request_id
+      - method
+      - path
+      - status_code
+      - response_time_ms
+      - user_id
+      - client_ip
+      - user_agent
+    retention_days: 30
+
+  # 业务处理日志
+  business:
+    format: json
+    fields:
+      - timestamp
+      - request_id
+      - service
+      - action
+      - entity_type
+      - entity_id
+      - status
+      - duration_ms
+      - details
+    retention_days: 90
+
+  # LLM 调用日志
+  llm:
+    format: json
+    fields:
+      - timestamp
+      - request_id
+      - model
+      - prompt_tokens
+      - completion_tokens
+      - latency_ms
+      - status
+      - fallback_used
+      - cost_estimate
+    retention_days: 90
+
+  # 异常堆栈日志
+  exception:
+    format: json
+    fields:
+      - timestamp
+      - request_id
+      - exception_type
+      - exception_message
+      - stack_trace
+      - context
+      - severity
+    retention_days: 365
+
+  # 审计日志（敏感操作）
+  audit:
+    format: json
+    fields:
+      - timestamp
+      - user_id
+      - action
+      - resource_type
+      - resource_id
+      - old_value
+      - new_value
+      - ip_address
+    retention_days: 365
+```
+
+#### 15.4.2 客户端日志规范
+
+```typescript
+// 前端日志配置
+interface ClientLogConfig {
+  // 日志级别
+  level: 'debug' | 'info' | 'warn' | 'error';
+
+  // 自动采集
+  autoCollect: {
+    // JavaScript 错误
+    jsErrors: boolean;
+    // Promise 拒绝
+    promiseRejections: boolean;
+    // 资源加载失败
+    resourceErrors: boolean;
+    // 控制台错误
+    consoleErrors: boolean;
+    // 网络请求
+    networkRequests: {
+      includeHeaders: boolean;
+      includeBody: boolean;
+      sensitiveFields: string[]; // 脱敏字段
+    };
+  };
+
+  // 性能指标
+  performance: {
+    // 页面加载时间
+    pageLoad: boolean;
+    // 首次内容绘制
+    fcp: boolean;
+    // 最大内容绘制
+    lcp: boolean;
+    // 累积布局偏移
+    cls: boolean;
+    // 首次输入延迟
+    fid: boolean;
+  };
+
+  // 用户行为（可选）
+  userBehavior: {
+    click: boolean;
+    scroll: boolean;
+    input: boolean;
+  };
+}
+
+// 日志上报配置
+interface LogUploadConfig {
+  // 上报端点
+  endpoint: '/api/v1/logs/client';
+
+  // 批量上报
+  batchSize: 10;
+  flushInterval: 5000; // 5秒
+
+  // 重试策略
+  retry: {
+    maxAttempts: 3;
+    backoff: 'exponential';
+    baseDelay: 1000;
+  };
+
+  // 本地缓存（离线场景）
+  localStorage: {
+    enabled: true;
+    maxSize: 5 * 1024 * 1024; // 5MB
+  };
+}
+```
+
+#### 15.4.3 异常检测规则
+
+```yaml
+# 异常检测配置
+exception_detection:
+  # 自动检测规则
+  rules:
+    - name: high_error_rate
+      description: 错误率超过阈值
+      condition: "error_count / total_requests > 0.05"
+      window: 5m
+      severity: critical
+
+    - name: repeated_exception
+      description: 同一异常重复出现
+      condition: "same_exception_count > 10"
+      window: 10m
+      severity: warning
+
+    - name: llm_timeout
+      description: LLM 调用超时
+      condition: "llm_latency > 30000"
+      severity: error
+
+    - name: database_connection_fail
+      description: 数据库连接失败
+      condition: "db_connection_error > 0"
+      severity: critical
+
+    - name: client_js_error_spike
+      description: 前端 JS 错误激增
+      condition: "js_error_count > 50"
+      window: 5m
+      severity: warning
+
+    - name: api_latency_high
+      description: API 响应延迟过高
+      condition: "p99_latency > 5000"
+      window: 5m
+      severity: warning
+
+  # 聚合策略
+  aggregation:
+    # 相同异常去重
+    dedup_window: 5m
+    dedup_fields: [exception_type, exception_message]
+
+    # 根因分析
+    root_cause_analysis: true
+    max_stack_depth: 10
+```
+
+#### 15.4.4 AI 管家异常通知机制
+
+```yaml
+# 通知配置
+notification:
+  # Email 通知人类管理员
+  email:
+    enabled: true
+    # 管理员邮箱列表（从配置读取）
+    recipients: ${ADMIN_EMAILS}  # 环境变量: ["admin@company.com", "dev-lead@company.com"]
+    # 邮件模板
+    templates:
+      critical:
+        subject: "[RippleFlow 紧急] {exception_type}"
+        body: |
+          ## 异常摘要
+          - 时间: {timestamp}
+          - 类型: {exception_type}
+          - 严重程度: {severity}
+          - 影响范围: {affected_users} 用户
+
+          ## 异常详情
+          ```
+          {exception_message}
+          ```
+
+          ## 堆栈信息
+          ```
+          {stack_trace}
+          ```
+
+          ## 上下文
+          {context_json}
+
+          ---
+          请尽快处理。查看完整日志: {log_url}
+
+      warning:
+        subject: "[RippleFlow 警告] {exception_type}"
+        body: |
+          检测到异常，请关注:
+          - 时间: {timestamp}
+          - 类型: {exception_type}
+          - 详情: {exception_message}
+
+  # 消息通道通知 nullclaw 自动开发团队
+  webhook:
+    enabled: true
+    # Webhook URL（从配置读取）
+    url: ${DEV_CHANNEL_WEBHOOK}  # 环境变量
+    # 请求格式
+    payload:
+      source: "rippleflow-butler"
+      event_type: "exception_detected"
+      severity: "{severity}"
+      timestamp: "{timestamp}"
+      data:
+        exception_type: "{exception_type}"
+        exception_message: "{exception_message}"
+        stack_trace: "{stack_trace}"
+        context: "{context}"
+        request_id: "{request_id}"
+        suggested_action: "{suggested_action}"  # AI 管家建议
+
+    # 重试策略
+    retry:
+      max_attempts: 3
+      backoff: [1000, 5000, 15000]
+```
+
+#### 15.4.5 AI 管家异常处理 Routine
+
+```markdown
+# routine_exception_handler.md
+
+## 触发条件
+- 系统检测到异常事件
+- 异常级别 >= WARNING
+
+## 处理流程
+
+### 1. 异常分析
+- 读取异常详情和堆栈
+- 分析异常类型和根因
+- 评估影响范围
+- 判断是否需要人工介入
+
+### 2. 通知决策
+```
+if severity == "CRITICAL":
+    立即通知（Email + Webhook）
+elif severity == "ERROR":
+    聚合后通知（5分钟窗口）
+elif severity == "WARNING":
+    记录日志，定时汇总
+```
+
+### 3. 执行通知
+- 发送 Email 给管理员
+- 发送 Webhook 给开发团队
+
+### 4. 后续处理
+- 记录通知状态
+- 跟踪处理进度
+- 定期汇报未解决问题
+
+## 配置项
+- admin_emails: 管理员邮箱列表
+- dev_channel_webhook: 开发团队 Webhook
+- notification_cooldown: 同一异常通知冷却时间（默认 30 分钟）
+```
+
+#### 15.4.6 日志查询接口
+
+```yaml
+# API: GET /api/v1/logs/search
+parameters:
+  - name: start_time
+    type: datetime
+    required: true
+  - name: end_time
+    type: datetime
+    required: true
+  - name: level
+    type: enum
+    values: [debug, info, warning, error, critical]
+  - name: category
+    type: enum
+    values: [api_access, business, llm, exception, audit, client]
+  - name: service
+    type: string
+  - name: request_id
+    type: string
+  - name: user_id
+    type: string
+  - name: keyword
+    type: string
+    description: 全文搜索关键词
+  - name: page
+    type: integer
+    default: 1
+  - name: size
+    type: integer
+    default: 50
+
+response:
+  total: integer
+  logs:
+    - timestamp: datetime
+      level: string
+      category: string
+      service: string
+      message: string
+      details: object
+      request_id: string
+      user_id: string
+```
+
+#### 15.4.7 日志存储架构
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    日志存储分层架构                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  热数据（最近 7 天）                                             │
+│  ├── 存储: Elasticsearch / Loki                                 │
+│  ├── 查询: 毫秒级                                               │
+│  └── 用途: 实时监控、异常检测                                    │
+│                                                                 │
+│  温数据（7-30 天）                                               │
+│  ├── 存储: 压缩文件存储                                          │
+│  ├── 查询: 秒级                                                 │
+│  └── 用途: 问题排查、趋势分析                                    │
+│                                                                 │
+│  冷数据（30 天-1 年）                                            │
+│  ├── 存储: 对象存储 / 归档                                       │
+│  ├── 查询: 分钟级                                               │
+│  └── 用途: 审计、合规                                           │
+│                                                                 │
+│  轻量部署方案（无 Elasticsearch）                                │
+│  ├── 存储: 本地文件 + SQLite 索引                                │
+│  ├── 查询: 秒级（使用 grep/sqlite）                              │
+│  └── 适用: 小团队、单机部署                                      │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 15.4.8 环境变量配置
+
+```bash
+# .env 文件示例
+
+# 管理员邮箱（多个用逗号分隔）
+ADMIN_EMAILS=admin@company.com,dev-lead@company.com
+
+# 开发团队 Webhook URL（用于通知 nullclaw 自动开发团队）
+DEV_CHANNEL_WEBHOOK=https://nullclaw.example.com/webhook/rippleflow-exceptions
+
+# SMTP 配置（用于发送邮件）
+SMTP_HOST=smtp.company.com
+SMTP_PORT=587
+SMTP_USER=noreply@rippleflow.company.com
+SMTP_PASSWORD=${SMTP_PASSWORD}
+
+# 日志配置
+LOG_LEVEL=INFO
+LOG_FORMAT=json
+LOG_PATH=/var/log/rippleflow
+
+# 异常检测配置
+EXCEPTION_DETECTION_ENABLED=true
+EXCEPTION_NOTIFICATION_COOLDOWN=1800  # 秒
+```
+
 ---
 
 ## 16. 并发控制（补充）
