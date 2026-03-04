@@ -146,7 +146,7 @@ Agent 从「执行者」变成「运营者」
 | 03 | [API 规范](./03_api_reference.yaml) | OpenAPI 3.0，全部 RESTful 接口 | SDD / TDD / E2E |
 | 04 | [服务层接口](./04_service_interfaces.md) | Python Protocol 定义，供 UT mock | TDD |
 | 05 | [E2E 测试目录](./05_e2e_test_catalog.md) | 用例清单（函数调用式）+ Playwright 结构 | ST / E2E |
-| 06 | [LLM Prompt 模板库](./06_llm_prompt_templates.md) | Stage 0–5 + Q&A + 纪要生成 + 管家 Prompt + PRD生成 + 工作流学习 | 开发 / 调优 |
+| 06 | [LLM Prompt 模板库](./06_llm_prompt_templates.md) | Stage 0–5 + Q&A + 纪要生成 + 管家 Prompt + PRD生成 + 工作流学习 + 字段建议 | 开发 / 调优 |
 | 07 | [单元测试目录](./07_unit_test_catalog.md) | 服务层 UT 用例清单，pytest + AsyncMock | TDD |
 | 08 | [AI 管家演化架构](./08_ai_butler_architecture.md) | 权限层级、自我演化机制、工作流托管、跨群任务分发、PRD上报 | SDD |
 | 09 | [用户手册](./09_user_manual.md) | 系统使用指南、使用场景演练、真实用户完整时序、AI管家操作手册 | 用户 / 产品 |
@@ -405,3 +405,5 @@ butler_experience_memory:
 | 0.3 | 2026-02-28 | 新增 07_unit_test_catalog.md |
 | 0.4 | 2026-03-01 | 新增机器人客户端架构、敏感授权升级机制 |
 | 0.5 | 2026-03-01 | 新增 AI 管家角色、问答反馈机制、每周快报、待办提醒 |
+| 0.6 | 2026-03-05 | 分阶段实施路线、Watchdog 架构、插件化扩展机制、设计答记者问 |
+| 0.7 | 2026-03-05 | 订阅类型扩展（10种）、内容发布（文档+链接卡片）、AI 智能辅助输入（§44） |

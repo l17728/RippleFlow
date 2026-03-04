@@ -2638,3 +2638,142 @@ if pattern_count >= 3:
 - style_notes 必须包含至少 2 条具体的风格偏好
 - 不得建议 trust_level=autonomous（初始必须 supervised）
 - trigger_pattern 长度不超过 200 字，保持简洁通用
+
+---
+
+## §25 字段建议 Prompt（BUTLER_FIELD_SUGGESTION_PROMPT）
+
+**用途**：AI 智能辅助输入，为用户在任意实体的任意字段填写时提供建议。
+
+**调用场景**：用户在 todo/document/shared_link/thread 等表单中填写
+category/tags/description/summary/title/due_date 等字段时，
+防抖 1s 后由 `IButlerSuggestionService.suggest()` 调用。
+
+### 25.1 Prompt 模板
+
+```
+你是 RippleFlow 知识平台的 AI 管家，正在为用户提供字段填写建议。
+
+## 请求参数
+- 实体类型（entity_type）：{entity_type}
+- 字段名（field）：{field}
+- 当前输入内容（content）：{content}
+- 历史高频值（historical_values）：{historical_values}
+- 附加上下文（context）：{context}
+
+## 9 大信息类别（用于 category 字段建议）
+tech_decision: 技术决策（架构选型、方案确认）
+qa_faq: 问题解答/FAQ
+bug_incident: 故障案例（Bug 报告、复盘）
+reference_data: 参考信息（IP、URL、账号名）
+action_item: 任务待办
+discussion_notes: 讨论纪要（会议总结、共识）
+knowledge_share: 知识分享（技术文章、经验）
+env_config: 环境配置（部署步骤、配置说明）
+project_update: 项目动态（发布公告、里程碑）
+
+## 任务
+根据以上信息，为字段 "{field}" 提供最多 5 条建议，按置信度从高到低排列。
+
+## 字段专项处理规则
+- tags：从 content 中提取关键技术词、业务词；优先复用 historical_values 中的高频 tag
+- category：对比 9 大类别定义，选择语义最匹配的 1-2 个类别 code
+- description：基于标题或 content 生成不超过 100 字的简介，语气简洁
+- summary：若 content 是链接页面内容，生成不超过 200 字的摘要；否则提炼要点
+- title：基于 content 生成简短有力的标题（≤50字）
+- due_date：从 content 中提取时间表述（"下周五"、"3月底"等），转为 YYYY-MM-DD 格式
+
+## 输出要求
+- 严格返回 JSON 数组，不包含任何其他文本
+- 格式：[{"value": "...", "confidence": 0.9, "reason": "..."}]
+- confidence 取值范围：0.0 ~ 1.0（两位小数）
+- reason 不超过 30 字，说明推荐理由
+- 若无合理建议（content 太短或字段不相关），返回空数组：[]
+```
+
+### 25.2 调用示例
+
+**场景：用户创建 todo，正在填写 tags 字段**
+
+```python
+# 输入
+entity_type = "todo"
+field = "tags"
+content = "Redis 连接池配置，需要确认最大连接数和超时参数"
+historical_values = ["redis", "配置", "数据库", "性能优化", "连接池"]
+
+# Prompt 渲染后调用 LLM
+
+# 期望输出
+[
+  {"value": "redis", "confidence": 0.95, "reason": "内容明确提及 Redis"},
+  {"value": "连接池", "confidence": 0.93, "reason": "核心话题词"},
+  {"value": "配置", "confidence": 0.88, "reason": "高频标签且符合内容"},
+  {"value": "数据库", "confidence": 0.75, "reason": "Redis 属于数据库范畴"},
+  {"value": "性能优化", "confidence": 0.62, "reason": "连接池配置常关联性能"}
+]
+```
+
+**场景：用户分享外部链接，字段为 summary（OG抓取后）**
+
+```python
+# 输入
+entity_type = "shared_link"
+field = "summary"
+content = "（链接页面的 OG description + 正文前500字）Redis 官方文档介绍了连接池的配置参数..."
+
+# 期望输出
+[
+  {
+    "value": "Redis 官方文档：介绍 maxclients、timeout 等连接池关键配置参数，附带性能建议与最佳实践。",
+    "confidence": 0.92,
+    "reason": "直接提炼页面核心内容"
+  }
+]
+```
+
+**场景：用户填写 due_date，描述中有时间信息**
+
+```python
+# 输入（假设今天是 2026-03-05）
+entity_type = "todo"
+field = "due_date"
+content = "下周五之前完成 Redis 连接池配置验收测试"
+
+# 期望输出
+[
+  {"value": "2026-03-13", "confidence": 0.91, "reason": "下周五对应 3月13日"}
+]
+```
+
+### 25.3 输出约束
+
+- **必须**是合法 JSON 数组（空数组 `[]` 也合法）
+- `confidence` 必须是 0.0 ~ 1.0 之间的浮点数（两位小数）
+- `reason` 不得超过 30 字
+- 最多返回 5 条建议
+- 不得返回重复的 `value`
+- 对于 `category` 字段，`value` 必须是 9 大类别 code 之一（如 `tech_decision`）
+- 对于 `tags` 字段，`value` 不得包含空格，建议使用短语或关键词
+
+### 25.4 采纳率自省 Routine（每周执行）
+
+管家每周分析 `butler_suggestions` 表，按 entity_type + field 统计采纳率：
+
+```
+SELECT
+    entity_type,
+    field,
+    COUNT(*) AS total,
+    SUM(applied::int) AS adopted,
+    ROUND(100.0 * SUM(applied::int) / COUNT(*), 1) AS adoption_rate
+FROM butler_suggestions
+WHERE created_at >= NOW() - INTERVAL '7 days'
+GROUP BY entity_type, field
+ORDER BY adoption_rate ASC;
+```
+
+**处理策略**：
+- 采纳率 < 20%：记录到 `insights/suggestion_quality.md`，下次 Prompt 调整（降低打扰频率或调整建议策略）
+- 采纳率 > 80%：可考虑将该场景的 auto_apply 阈值调低（0.85 → 0.80）
+- 持续 3 周采纳率 < 10%：生成 PRD 上报，建议停用该字段的建议功能

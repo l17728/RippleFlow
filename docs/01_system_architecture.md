@@ -8213,4 +8213,99 @@ GET  /api/v1/internal/watchdog/events   查询重启历史（管理员）
 
 ---
 
+---
+
+## §44 AI 智能辅助输入设计模式
+
+### 44.1 设计意图
+
+用户在系统中填写任意字段（分类、标签、描述、标题等）时，
+管家通过 `IButlerSuggestionService` 实时提供智能建议，
+贯穿全系统所有实体创建/编辑场景。
+
+**核心原则：辅助而不替代，建议而不强制。**
+管家提供参考，用户保持最终决策权；建议被忽略视为正常，系统不重复打扰。
+
+### 44.2 统一交互模型
+
+```
+用户在任意表单字段输入
+    |
+    | 防抖 1s（用户停止输入）
+    v
+客户端调用 POST /api/v1/butler/suggest
+    {entity_type, field, content, entity_id?, context?}
+    |
+    | < 2s 响应（超时返回空列表，不阻塞用户）
+    v
+管家返回建议列表
+    [{value, confidence, reason}]（最多 5 条，按置信度降序）
+    |
+    v
+客户端根据最高置信度决定展示方式：
+    confidence > 0.9  -->  auto_apply（静默填入，角标提示已由管家填写）
+    0.7 ~ 0.9         -->  highlight（高亮显示，用户一键确认）
+    < 0.7             -->  list（展示选项列表，用户自选）
+    |
+    v
+用户确认/修改/忽略
+    |
+    v
+客户端异步上报 POST /api/v1/butler/suggest/feedback
+    {suggestion_id, applied, applied_value?}
+```
+
+### 44.3 适用场景
+
+| 实体 | 字段 | 建议来源 |
+|------|------|----------|
+| todo | category | 9大类别 + 历史分类分布 |
+| todo | tags | 内容关键词 + 历史高频 tags |
+| todo | description | 基于标题补全描述（≤100字） |
+| todo | due_date | 从描述中提取时间（"下周五"→具体日期） |
+| document | title | 基于正文第一段生成标题 |
+| document | category | 对比 9 大类别匹配最合适的 |
+| document | tags | 文档关键词提取 |
+| shared_link | category | 基于 OG 标题/描述判断分类 |
+| shared_link | tags | 链接内容关键词 |
+| shared_link | summary | 抓取页面后生成摘要（≤200字） |
+| thread（手动调整） | category | 重新分类时提供建议 |
+| workflow | name | 基于触发条件和步骤生成名称 |
+| custom_field | value | 基于同类字段历史值推荐 |
+
+### 44.4 学习闭环
+
+```
+butler_suggestions 表积累反馈数据
+    |
+    v（每周 Routine C 执行）
+分析：按 entity_type + field 统计采纳率
+    - 高采纳率字段：保持或加强 Prompt
+    - 低采纳率字段：调整建议策略（减少打扰或改善质量）
+    - auto_apply 后用户撤销：降低该场景的 confidence 阈值
+    |
+    v
+更新 butler_prompts/insights/suggestion_quality.md
+    （管家自维护的优化记录）
+    |
+    v（月度评估触发）
+若建议质量持续低于阈值 -> 生成 PRD 上报给 claw 开发团队
+```
+
+### 44.5 性能保障
+
+- **防抖**：客户端 1s 防抖，避免每次按键触发
+- **超时降级**：2s 超时直接返回空列表，用户继续手动填写，不影响体验
+- **重复检测**：`context_hash`（SHA-256(content) 前缀）防止相同内容重复触发
+- **批量限制**：每个用户每分钟最多 30 次建议请求（Rate Limit）
+- **缓存**：相同 context_hash 在 60s 内复用上次结果（不重复 LLM 调用）
+
+### 44.6 隐私边界
+
+- 建议请求只发送「当前字段内容」和「实体类型」，不发送其他字段
+- 历史建议记录（butler_suggestions）仅用于采纳率分析，不用于跨用户推荐
+- 管理员不可查看个人的建议历史，仅可查看聚合统计
+
+---
+
 **END OF DOCUMENT**

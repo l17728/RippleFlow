@@ -100,9 +100,13 @@ Phase 0 → Phase 1 → Phase 2 → Phase 3
 | 软能力扩展（分类/任务类型） | extension_definitions | /api/v1/extensions/definitions/* |
 | 自定义属性 | custom_field_definitions, custom_field_values | /api/v1/custom-fields/* |
 | 检索召回率自省 | search_logs, recall_evaluations | — |
+| **内容发布 - 富文本文档** | user_documents | /api/v1/documents/* |
+| **内容发布 - 外部链接卡片** | shared_links | /api/v1/shared-links/* |
+| **AI 智能辅助输入全系统集成** | — | 前端逐步接入 §44 设计模式 |
 
 **工程重点**：
 - §24 工作流学习 Prompt 调优
+- §25 字段建议 Prompt 调优与采纳率自省
 - nullclaw Routine 框架完善（Routine A/B/C）
 - 插件机制第一个实际插件交付验证
 
@@ -169,11 +173,15 @@ Phase 3（全功能，可拆分独立交付）
 | notifications, user_presence, queued_notifications | 1 | 推送基础设施 |
 | nullclaw_pending_events, watchdog_events | 1 | 可靠性基础 |
 | faq_quality_alerts | 1 | FAQ 质量闭环 |
+| user_subscriptions（扩展类型） | 1 | 订阅类型枚举扩展（新增6种） |
+| butler_suggestions | 1 | AI 智能辅助输入基础设施，全系统复用 |
 | workflow_templates, workflow_instances, task_delegates | 2 | 管家自动化 |
 | extension_definitions | 2 | 软扩展 |
 | search_logs, recall_evaluations | 2 | 召回率自省 |
 | custom_field_definitions, custom_field_values | 2 | 自定义属性 |
 | butler_proposals（PRD扩展字段） | 2 | PRD上报 |
+| user_documents | 2 | 内容发布 - 系统内富文本文档 |
+| shared_links | 2 | 内容发布 - 外部链接分享卡片 |
 | extension_registry, extension_invocation_logs | 3 | 硬扩展生态 |
 | failed_messages | 3 | DLQ |
 | archive_status（字段） | 3 | 数据归档 |

@@ -756,12 +756,20 @@ CREATE INDEX idx_contribution_monthly_rank ON user_contribution_stats(monthly_ra
 CREATE TABLE user_subscriptions (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id         VARCHAR(255) NOT NULL,          -- 订阅者 ldap_user_id
-    subscription_type VARCHAR(50) NOT NULL,         -- 'user' | 'thread' | 'category' | 'keyword'
+    subscription_type VARCHAR(50) NOT NULL,
+        -- 'user' | 'thread' | 'category' | 'keyword'
+        -- | 'todo' | 'resource' | 'event' | 'document' | 'shared_link' | 'workflow'
     target_id       VARCHAR(255) NOT NULL,          -- 被订阅对象 ID
     -- user: ldap_user_id
-    -- thread: thread UUID
+    -- thread/todo/document/shared_link/workflow: UUID
     -- category: category code
     -- keyword: 关键词文本
+    -- resource: reference_data_items UUID
+    filter_criteria JSONB NOT NULL DEFAULT '{}',
+    -- 可选过滤条件，例如：
+    -- {"author": "zhangsan"}  关注某人所有发布的内容
+    -- {"tags": ["redis"]}     只关注含特定标签的内容
+    -- {"category": "tech_decision"}  只关注特定类别
     notification_types TEXT[] NOT NULL DEFAULT ARRAY['in_app'],
     -- 'in_app' | 'email' | 'push' 的组合
     is_active       BOOLEAN NOT NULL DEFAULT TRUE,
@@ -890,7 +898,9 @@ CREATE TABLE subscription_events (
     event_type      VARCHAR(100) NOT NULL,
     -- 'thread_updated' | 'thread_new_message' | 'user_contribution' | 'category_new_thread'
     actor_id        VARCHAR(255),                   -- 触发事件的用户
-    target_type     VARCHAR(50) NOT NULL,           -- 'thread' | 'user' | 'category'
+    target_type     VARCHAR(50) NOT NULL,
+        -- 'thread' | 'user' | 'category'
+        -- | 'todo' | 'resource' | 'document' | 'shared_link' | 'workflow'
     target_id       VARCHAR(255) NOT NULL,          -- 目标对象 ID
     payload         JSONB NOT NULL DEFAULT '{}',    -- 事件详情
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -2448,3 +2458,123 @@ ALTER TABLE butler_proposals
 
 COMMENT ON COLUMN butler_proposals.prd_content IS 'PRD markdown 全文，由管家自省生成，上报给管理员和开发团队';
 COMMENT ON COLUMN butler_proposals.notify_devs IS '是否通知 claw 开发团队';
+
+-- =============================================================
+-- ALTER personal_todos：支持 Plan 任务卡（todo_type + milestones）
+-- =============================================================
+
+ALTER TABLE personal_todos
+    ADD COLUMN todo_type  VARCHAR(20) NOT NULL DEFAULT 'task'
+        CHECK (todo_type IN ('task', 'plan')),
+    ADD COLUMN milestones JSONB NOT NULL DEFAULT '[]';
+    -- plan 专属里程碑列表，task 类型忽略
+    -- [{"title":"设计评审", "due":"2026-04-01", "done":false}]
+
+COMMENT ON COLUMN personal_todos.todo_type IS 'task=普通任务（默认）| plan=计划卡（含里程碑）';
+COMMENT ON COLUMN personal_todos.milestones IS 'plan 类型的里程碑列表：[{title, due, done}]';
+
+-- =============================================================
+-- TABLE: user_documents
+-- 用户发布的富文本文档（系统内 Markdown 编辑）
+-- =============================================================
+
+CREATE TABLE user_documents (
+    id                        UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    title                     VARCHAR(500) NOT NULL,
+    content                   TEXT,                     -- Markdown 富文本
+    summary                   TEXT,                     -- AI 生成摘要（≤200字）
+    author_id                 VARCHAR(255) NOT NULL,    -- ldap_user_id
+    group_id                  VARCHAR(255),             -- 关联的群组（可选）
+    category                  VARCHAR(100),             -- 9大类别 code 或自定义
+    tags                      TEXT[] DEFAULT '{}',
+    visibility                VARCHAR(20) NOT NULL DEFAULT 'team',
+        -- 'private' | 'followers' | 'team' | 'public'
+    published_at              TIMESTAMPTZ,              -- 发布时间，NULL=草稿
+    view_count                INTEGER NOT NULL DEFAULT 0,
+    -- 管家建议字段（创建时管家推荐，用户可采纳）
+    butler_suggested_category VARCHAR(100),
+    butler_suggested_tags     TEXT[] DEFAULT '{}',
+    -- 溯源：关联原始话题线索
+    source_thread_id          UUID REFERENCES topic_threads(id) ON DELETE SET NULL,
+    created_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at                TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_user_docs_author   ON user_documents (author_id, published_at DESC);
+CREATE INDEX idx_user_docs_group    ON user_documents (group_id, published_at DESC) WHERE group_id IS NOT NULL;
+CREATE INDEX idx_user_docs_category ON user_documents (category) WHERE category IS NOT NULL;
+CREATE INDEX idx_user_docs_draft    ON user_documents (author_id) WHERE published_at IS NULL;
+
+COMMENT ON TABLE user_documents IS '用户发布的富文本文档，系统客户端 Markdown 在线编辑，支持团队内共享';
+
+-- =============================================================
+-- TABLE: shared_links
+-- 外部链接分享卡片（URL + OG元数据 + 管家推荐）
+-- =============================================================
+
+CREATE TABLE shared_links (
+    id                        UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    url                       TEXT NOT NULL,
+    -- 人工填写或 OG 抓取的元数据
+    title                     VARCHAR(500),
+    description               TEXT,
+    site_name                 VARCHAR(200),
+    favicon_url               TEXT,
+    preview_image             TEXT,
+    -- 分享者与上下文
+    shared_by                 VARCHAR(255) NOT NULL,    -- ldap_user_id
+    group_id                  VARCHAR(255),             -- 关联群组（可选）
+    category                  VARCHAR(100),
+    tags                      TEXT[] DEFAULT '{}',
+    visibility                VARCHAR(20) NOT NULL DEFAULT 'team',
+        -- 'private' | 'followers' | 'team' | 'public'
+    -- 管家建议字段
+    butler_suggested_category VARCHAR(100),
+    butler_suggested_tags     TEXT[] DEFAULT '{}',
+    butler_summary            TEXT,                     -- 管家对链接内容的摘要（≤200字）
+    -- OG 抓取状态
+    metadata_fetched_at       TIMESTAMPTZ,              -- NULL=尚未抓取
+    fetch_status              VARCHAR(20) DEFAULT 'pending',
+        -- 'pending' | 'success' | 'failed' | 'skipped'
+    view_count                INTEGER NOT NULL DEFAULT 0,
+    created_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at                TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_shared_links_sharer   ON shared_links (shared_by, created_at DESC);
+CREATE INDEX idx_shared_links_group    ON shared_links (group_id, created_at DESC) WHERE group_id IS NOT NULL;
+CREATE INDEX idx_shared_links_category ON shared_links (category) WHERE category IS NOT NULL;
+CREATE INDEX idx_shared_links_fetch    ON shared_links (fetch_status) WHERE fetch_status = 'pending';
+
+COMMENT ON TABLE shared_links IS '外部链接分享卡片：URL + OG元数据，管家自动抓取摘要，点击跳转原始URL';
+-- =============================================================
+-- TABLE: butler_suggestions
+-- AI 智能辅助输入记录（跨切面，贯穿全系统）
+-- =============================================================
+
+CREATE TABLE butler_suggestions (
+    id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id       VARCHAR(255) NOT NULL,
+    entity_type   VARCHAR(50) NOT NULL,
+        -- 'document' | 'shared_link' | 'todo' | 'thread' | 'workflow'
+        -- | 'custom_field' | 'faq_item' | 其他扩展类型
+    entity_id     UUID,                        -- NULL = 实体创建中（尚未保存）
+    field         VARCHAR(100) NOT NULL,
+        -- 'category' | 'tags' | 'title' | 'description' | 'summary' | 其他字段名
+    context_hash  VARCHAR(64),                 -- SHA-256(content) 前缀，避免重复触发
+    suggestions   JSONB NOT NULL,
+        -- [{"value": "...", "confidence": 0.85, "reason": "不超过30字"}]
+        -- 按置信度降序，最多 5 条
+    applied       BOOLEAN NOT NULL DEFAULT FALSE,
+    applied_value TEXT,                        -- 用户最终采纳的值（可能不在建议中）
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_butler_sugg_entity ON butler_suggestions (entity_type, entity_id)
+    WHERE entity_id IS NOT NULL;
+CREATE INDEX idx_butler_sugg_user ON butler_suggestions (user_id, created_at DESC);
+CREATE INDEX idx_butler_sugg_field ON butler_suggestions (entity_type, field, applied);
+
+COMMENT ON TABLE butler_suggestions IS 'AI 智能辅助输入记录，跨切面贯穿全系统所有实体字段填写场景';
+COMMENT ON COLUMN butler_suggestions.context_hash IS '输入内容 hash，相同 hash 在短时间内不重复触发';
+COMMENT ON COLUMN butler_suggestions.suggestions IS '[{value, confidence, reason}]，最多5条';

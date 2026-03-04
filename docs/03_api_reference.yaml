@@ -73,6 +73,10 @@ tags:
   description: AI管家工作流托管与跨群任务分发
 - name: custom-fields
   description: 跟踪项自定义属性
+- name: documents
+  description: 用户富文本文档发布（系统内 Markdown 编辑，团队内共享）
+- name: shared-links
+  description: 外部链接分享卡片（URL + OG元数据，点击跳转）
 components:
   securitySchemes:
     cookieAuth:
@@ -2374,6 +2378,62 @@ components:
         set_at:
           type: string
           format: date-time
+    UserDocument:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        content: { type: string, nullable: true }
+        summary: { type: string, nullable: true }
+        author_id: { type: string }
+        group_id: { type: string, nullable: true }
+        category: { type: string, nullable: true }
+        tags:
+          type: array
+          items: { type: string }
+        visibility: { type: string, enum: [private, followers, team, public] }
+        published_at: { type: string, format: date-time, nullable: true }
+        view_count: { type: integer }
+        butler_suggested_category: { type: string, nullable: true }
+        butler_suggested_tags:
+          type: array
+          items: { type: string }
+        source_thread_id: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SharedLink:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        url: { type: string, format: uri }
+        title: { type: string, nullable: true }
+        description: { type: string, nullable: true }
+        site_name: { type: string, nullable: true }
+        favicon_url: { type: string, nullable: true }
+        preview_image: { type: string, nullable: true }
+        shared_by: { type: string }
+        group_id: { type: string, nullable: true }
+        category: { type: string, nullable: true }
+        tags:
+          type: array
+          items: { type: string }
+        visibility: { type: string, enum: [private, followers, team, public] }
+        butler_suggested_category: { type: string, nullable: true }
+        butler_suggested_tags:
+          type: array
+          items: { type: string }
+        butler_summary: { type: string, nullable: true }
+        metadata_fetched_at: { type: string, format: date-time, nullable: true }
+        fetch_status: { type: string, enum: [pending, success, failed, skipped] }
+        view_count: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ButlerSuggestion:
+      type: object
+      properties:
+        value: { type: string }
+        confidence: { type: number, format: float, minimum: 0, maximum: 1 }
+        reason: { type: string, maxLength: 30 }
 security:
 - cookieAuth: []
 paths:
@@ -7559,3 +7619,476 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CustomFieldValue'
+
+    UserDocument:
+      type: object
+      description: 用户发布的富文本文档（系统内 Markdown 编辑）
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        content: { type: string, nullable: true, description: Markdown 富文本 }
+        summary: { type: string, nullable: true, description: AI生成摘要 }
+        author_id: { type: string }
+        group_id: { type: string, nullable: true }
+        category: { type: string, nullable: true }
+        tags:
+          type: array
+          items: { type: string }
+        visibility:
+          type: string
+          enum: [private, followers, team, public]
+        published_at: { type: string, format: date-time, nullable: true }
+        view_count: { type: integer }
+        butler_suggested_category: { type: string, nullable: true }
+        butler_suggested_tags:
+          type: array
+          items: { type: string }
+        source_thread_id: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    SharedLink:
+      type: object
+      description: 外部链接分享卡片（URL + OG元数据，点击跳转原始URL）
+      properties:
+        id: { type: string, format: uuid }
+        url: { type: string, format: uri }
+        title: { type: string, nullable: true }
+        description: { type: string, nullable: true }
+        site_name: { type: string, nullable: true }
+        favicon_url: { type: string, nullable: true }
+        preview_image: { type: string, nullable: true }
+        shared_by: { type: string }
+        group_id: { type: string, nullable: true }
+        category: { type: string, nullable: true }
+        tags:
+          type: array
+          items: { type: string }
+        visibility:
+          type: string
+          enum: [private, followers, team, public]
+        butler_suggested_category: { type: string, nullable: true }
+        butler_suggested_tags:
+          type: array
+          items: { type: string }
+        butler_summary: { type: string, nullable: true }
+        metadata_fetched_at: { type: string, format: date-time, nullable: true }
+        fetch_status:
+          type: string
+          enum: [pending, success, failed, skipped]
+        view_count: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ButlerSuggestion:
+      type: object
+      description: 单条 AI 字段建议
+      properties:
+        value:
+          type: string
+          description: 建议的值
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: 置信度（0-1）
+        reason:
+          type: string
+          maxLength: 30
+          description: 建议理由（不超过30字）
+  /api/v1/documents:
+    get:
+      tags: [documents]
+      summary: 列出文档
+      description: 列出当前用户可访问的文档，支持按作者、群组、类别过滤。
+      parameters:
+        - name: author_id
+          in: query
+          schema: { type: string }
+        - name: group_id
+          in: query
+          schema: { type: string }
+        - name: category
+          in: query
+          schema: { type: string }
+        - name: published_only
+          in: query
+          schema: { type: boolean, default: true }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        '200':
+          description: 文档列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/UserDocument' }
+    post:
+      tags: [documents]
+      summary: 创建文档草稿
+      description: 创建富文本文档草稿，管家自动提供分类/标签建议。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string, maxLength: 500 }
+                content: { type: string }
+                visibility:
+                  type: string
+                  enum: [private, followers, team, public]
+                  default: team
+                group_id: { type: string }
+      responses:
+        '201':
+          description: 草稿创建成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserDocument' }
+
+  /api/v1/documents/{document_id}:
+    get:
+      tags: [documents]
+      summary: 获取文档详情
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 文档详情
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserDocument' }
+        '403': { description: 无访问权限 }
+        '404': { description: 文档不存在 }
+    put:
+      tags: [documents]
+      summary: 更新文档内容或元数据
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string }
+                content: { type: string }
+                category: { type: string }
+                tags:
+                  type: array
+                  items: { type: string }
+                visibility:
+                  type: string
+                  enum: [private, followers, team, public]
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserDocument' }
+    delete:
+      tags: [documents]
+      summary: 删除文档
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: 删除成功 }
+
+  /api/v1/documents/{document_id}/publish:
+    post:
+      tags: [documents]
+      summary: 发布文档
+      description: 将草稿发布，触发订阅者推送通知。
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 发布成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserDocument' }
+
+  /api/v1/users/{user_id}/documents:
+    get:
+      tags: [documents]
+      summary: 获取某用户的公开文档
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        '200':
+          description: 用户文档列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/UserDocument' }
+
+  # -------------------------------------------------
+  # 外部链接卡片（内容发布 - 链接分享）
+  # -------------------------------------------------
+
+  /api/v1/shared-links:
+    get:
+      tags: [shared-links]
+      summary: 列出链接卡片
+      parameters:
+        - name: shared_by
+          in: query
+          schema: { type: string }
+        - name: group_id
+          in: query
+          schema: { type: string }
+        - name: category
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        '200':
+          description: 链接卡片列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SharedLink' }
+    post:
+      tags: [shared-links]
+      summary: 新增链接卡片
+      description: |
+        创建外部链接分享卡片。异步抓取 OG 元数据，
+        管家自动生成分类/标签/摘要建议。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string, format: uri }
+                group_id: { type: string }
+                visibility:
+                  type: string
+                  enum: [private, followers, team, public]
+                  default: team
+      responses:
+        '201':
+          description: 链接卡片创建成功（OG 元数据后台异步抓取）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SharedLink' }
+
+  /api/v1/shared-links/{link_id}:
+    get:
+      tags: [shared-links]
+      summary: 获取链接卡片详情
+      parameters:
+        - name: link_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 链接卡片详情
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SharedLink' }
+        '404': { description: 不存在 }
+    put:
+      tags: [shared-links]
+      summary: 编辑链接卡片元数据
+      parameters:
+        - name: link_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string }
+                description: { type: string }
+                category: { type: string }
+                tags:
+                  type: array
+                  items: { type: string }
+                visibility:
+                  type: string
+                  enum: [private, followers, team, public]
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SharedLink' }
+    delete:
+      tags: [shared-links]
+      summary: 删除链接卡片
+      parameters:
+        - name: link_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: 删除成功 }
+
+
+  # -------------------------------------------------
+  # AI 智能辅助输入（跨切面设计模式）
+  # -------------------------------------------------
+
+  /api/v1/butler/suggest:
+    post:
+      tags: [butler]
+      summary: 请求字段填写建议
+      description: |
+        AI 管家为用户在填写任意实体（todo/document/shared_link/thread等）的
+        任意字段（category/tags/title/description/summary等）时提供智能建议。
+
+        **触发时机**：用户输入停止 1s 后（防抖），客户端自动调用。
+        **响应时限**：< 2s（超时返回空列表，不影响用户操作）。
+
+        **三级建议强度**（由客户端根据 confidence 决定展示方式）：
+        - confidence > 0.9：auto_apply — 静默填入，角标提示
+        - 0.7 ≤ confidence ≤ 0.9：highlight — 高亮推荐，一键确认
+        - confidence < 0.7：list — 提供选项列表，用户自选
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entity_type, field, content]
+              properties:
+                entity_type:
+                  type: string
+                  description: 实体类型
+                  enum: [todo, document, shared_link, thread, workflow, custom_field, faq_item]
+                field:
+                  type: string
+                  description: 字段名
+                  enum: [category, tags, title, description, summary, due_date, name]
+                content:
+                  type: string
+                  description: 当前输入内容（用于推断建议）
+                entity_id:
+                  type: string
+                  format: uuid
+                  description: 实体 ID（编辑已有实体时提供；创建时为 null）
+                context:
+                  type: object
+                  description: 附加上下文（如 group_id、source_thread_id 等）
+                  additionalProperties: true
+      responses:
+        '200':
+          description: 建议列表（按置信度降序，最多 5 条）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  suggestion_id:
+                    type: string
+                    format: uuid
+                    description: 本次建议的记录 ID，用于 feedback
+                  suggestions:
+                    type: array
+                    items: { $ref: '#/components/schemas/ButlerSuggestion' }
+                  common_values:
+                    type: array
+                    items: { type: string }
+                    description: 历史高频值（辅助选择，不含置信度）
+
+  /api/v1/butler/suggest/feedback:
+    post:
+      tags: [butler]
+      summary: 记录建议采纳情况
+      description: |
+        用户确认/修改/忽略建议后，异步上报采纳情况。
+        管家每周 Routine 分析采纳率，优化 Prompt。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [suggestion_id, applied]
+              properties:
+                suggestion_id:
+                  type: string
+                  format: uuid
+                applied:
+                  type: boolean
+                  description: 是否采纳了建议中的某个值
+                applied_value:
+                  type: string
+                  description: 最终采纳的值（可能是建议中的，也可能是用户自己输入的）
+      responses:
+        '204': { description: 反馈已记录 }
+
+  /api/v1/butler/suggest/common-tags:
+    get:
+      tags: [butler]
+      summary: 获取高频标签
+      description: 获取某实体类型下的历史高频标签，辅助前端标签选择器。
+      parameters:
+        - name: entity_type
+          in: query
+          required: true
+          schema: { type: string }
+        - name: group_id
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20 }
+      responses:
+        '200':
+          description: 高频标签列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    tag: { type: string }
+                    usage_count: { type: integer }

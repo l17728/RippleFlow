@@ -1493,7 +1493,9 @@ class Subscription:
     """订阅记录"""
     id: str
     user_id: str
-    subscription_type: str  # 'user' | 'thread' | 'category' | 'keyword'
+    subscription_type: str
+    # 'user' | 'thread' | 'category' | 'keyword'
+    # | 'todo' | 'resource' | 'event' | 'document' | 'shared_link' | 'workflow'
     target_id: str
     target_name: str | None
     notification_types: list[str]
@@ -1514,8 +1516,9 @@ class ISubscriptionService(Protocol):
         subscription_type: str,
         target_id: str,
         notification_types: list[str] | None = None,
+        filter_criteria: dict | None = None,
     ) -> Subscription:
-        """创建订阅。"""
+        """创建订阅。filter_criteria 可选：{"author":"zhangsan"} 或 {"tags":["redis"]}"""
         ...
 
     async def unsubscribe(self, subscription_id: str, user_id: str) -> None:
@@ -1547,6 +1550,19 @@ class ISubscriptionService(Protocol):
         payload: dict | None = None,
     ) -> list[str]:
         """发布订阅事件，通知相关订阅者。"""
+        ...
+
+    async def get_followable_targets(
+        self,
+        entity_type: str,
+        query: str,
+        limit: int = 10,
+    ) -> list[dict]:
+        """
+        搜索可关注的对象，供前端选择器使用。
+        entity_type: 'user' | 'thread' | 'todo' | 'document' | 'shared_link' | 'workflow' 等
+        返回：[{"id": ..., "name": ..., "type": ..., "description": ...}]
+        """
         ...
 ```
 
@@ -2772,24 +2788,319 @@ class ICustomFieldService(Protocol):
 ```
 
 ---
+---
+
+## 20. UserDocumentService
+
+```python
+# rippleflow/services/interfaces/user_document_service.py
+from typing import Protocol
+from dataclasses import dataclass
+from uuid import UUID
+
+
+@dataclass
+class UserDocument:
+    """用户发布的富文本文档"""
+    id: UUID
+    title: str
+    content: str | None            # Markdown 富文本
+    summary: str | None            # AI 生成摘要（<=200字）
+    author_id: str
+    group_id: str | None
+    category: str | None
+    tags: list[str]
+    visibility: str                # 'private' | 'followers' | 'team' | 'public'
+    published_at: str | None       # None = 草稿
+    view_count: int
+    butler_suggested_category: str | None
+    butler_suggested_tags: list[str]
+    source_thread_id: UUID | None
+    created_at: str
+    updated_at: str
+
+
+class IUserDocumentService(Protocol):
+    """
+    用户文档服务。
+    管理系统内富文本文档的创建、编辑、发布和访问控制。
+    创建/更新时自动触发管家字段建议（通过 IButlerSuggestionService）。
+    发布时触发订阅推送（通过 ISubscriptionService.publish_event）。
+    """
+
+    async def create_document(
+        self,
+        author_id: str,
+        title: str,
+        content: str | None = None,
+        visibility: str = 'team',
+        group_id: str | None = None,
+    ) -> UserDocument:
+        """创建文档草稿。"""
+        ...
+
+    async def update_document(
+        self,
+        document_id: UUID,
+        user_id: str,
+        title: str | None = None,
+        content: str | None = None,
+        category: str | None = None,
+        tags: list[str] | None = None,
+        visibility: str | None = None,
+    ) -> UserDocument:
+        """更新文档内容或元数据，仅作者可操作。"""
+        ...
+
+    async def publish_document(
+        self,
+        document_id: UUID,
+        user_id: str,
+    ) -> UserDocument:
+        """发布文档（草稿→已发布），触发订阅者推送。"""
+        ...
+
+    async def get_document(
+        self, document_id: UUID, viewer_id: str
+    ) -> UserDocument | None:
+        """获取文档详情，检查访问权限。"""
+        ...
+
+    async def delete_document(
+        self, document_id: UUID, user_id: str
+    ) -> None:
+        """删除文档，仅作者或管理员可操作。"""
+        ...
+
+    async def list_documents(
+        self,
+        viewer_id: str,
+        author_id: str | None = None,
+        group_id: str | None = None,
+        category: str | None = None,
+        published_only: bool = True,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[UserDocument]:
+        """列出可访问的文档，支持多维度过滤。"""
+        ...
+
+    async def generate_summary(
+        self, document_id: UUID
+    ) -> str:
+        """调用 LLM 为文档生成摘要并更新 summary 字段。"""
+        ...
+```
+
+---
+
+## 21. SharedLinkService
+
+```python
+# rippleflow/services/interfaces/shared_link_service.py
+from typing import Protocol
+from dataclasses import dataclass
+from uuid import UUID
+
+
+@dataclass
+class SharedLink:
+    """外部链接分享卡片"""
+    id: UUID
+    url: str
+    title: str | None
+    description: str | None
+    site_name: str | None
+    favicon_url: str | None
+    preview_image: str | None
+    shared_by: str
+    group_id: str | None
+    category: str | None
+    tags: list[str]
+    visibility: str
+    butler_suggested_category: str | None
+    butler_suggested_tags: list[str]
+    butler_summary: str | None
+    metadata_fetched_at: str | None
+    fetch_status: str              # 'pending' | 'success' | 'failed' | 'skipped'
+    view_count: int
+    created_at: str
+    updated_at: str
+
+
+class ISharedLinkService(Protocol):
+    """
+    外部链接分享服务。
+    创建后异步抓取 OG 元数据，管家自动生成分类/标签/摘要建议。
+    """
+
+    async def create_shared_link(
+        self,
+        user_id: str,
+        url: str,
+        group_id: str | None = None,
+        visibility: str = 'team',
+    ) -> SharedLink:
+        """
+        创建链接卡片。
+        返回时元数据可能尚未抓取（fetch_status='pending'）。
+        后台异步任务负责抓取 OG 数据并更新 fetch_status。
+        """
+        ...
+
+    async def update_shared_link(
+        self,
+        link_id: UUID,
+        user_id: str,
+        title: str | None = None,
+        description: str | None = None,
+        category: str | None = None,
+        tags: list[str] | None = None,
+        visibility: str | None = None,
+    ) -> SharedLink:
+        """手动更新链接元数据或分类/标签，仅创建者可操作。"""
+        ...
+
+    async def delete_shared_link(
+        self, link_id: UUID, user_id: str
+    ) -> None:
+        """删除链接卡片。"""
+        ...
+
+    async def get_shared_link(
+        self, link_id: UUID, viewer_id: str
+    ) -> SharedLink | None:
+        """获取链接卡片详情，记录访问次数。"""
+        ...
+
+    async def list_shared_links(
+        self,
+        viewer_id: str,
+        shared_by: str | None = None,
+        group_id: str | None = None,
+        category: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[SharedLink]:
+        """列出可访问的链接卡片。"""
+        ...
+
+    async def fetch_og_metadata(
+        self, link_id: UUID
+    ) -> dict:
+        """
+        抓取链接的 OG 元数据并更新数据库。
+        返回：{title, description, site_name, favicon_url, preview_image}
+        超时或失败时 fetch_status -> 'failed'，仍可手动填写元数据。
+        """
+        ...
+```
+
+---
+
+## 22. ButlerSuggestionService
+
+```python
+# rippleflow/services/interfaces/butler_suggestion_service.py
+from typing import Protocol
+from dataclasses import dataclass
+from uuid import UUID
+
+
+@dataclass
+class SuggestionItem:
+    value: str
+    confidence: float     # 0.0 ~ 1.0
+    reason: str           # <= 30
+
+
+@dataclass
+class SuggestionResult:
+    suggestion_id: UUID
+    suggestions: list[SuggestionItem]
+    common_values: list[str]
+
+
+class IButlerSuggestionService(Protocol):
+    """
+    AI 智能辅助输入服务（跨切面设计模式）。
+
+    用户在任意实体的任意字段填写时，通过此服务获取管家建议。
+    设计原则：
+    - 防抖 1s 后触发（由客户端控制）
+    - 响应时限 < 2s，超时返回空列表
+    - 三级强度：confidence > 0.9 (auto_apply) | 0.7-0.9 (highlight) | <0.7 (list)
+    - 采纳反馈 -> 每周 Routine 分析 -> 优化 Prompt
+    """
+
+    async def suggest(
+        self,
+        user_id: str,
+        entity_type: str,
+        field: str,
+        content: str,
+        entity_id: UUID | None = None,
+        context: dict | None = None,
+    ) -> SuggestionResult:
+        """为指定实体字段的输入提供智能建议，< 2s 响应。"""
+        ...
+
+    async def record_feedback(
+        self,
+        suggestion_id: UUID,
+        applied: bool,
+        applied_value: str | None = None,
+    ) -> None:
+        """记录用户对建议的采纳情况，供 Routine 分析采纳率。"""
+        ...
+
+    async def get_common_tags(
+        self,
+        entity_type: str,
+        group_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        """获取历史高频标签，辅助前端标签选择器。返回：[{tag, usage_count}]"""
+        ...
+
+    async def prefetch_link_metadata(self, url: str) -> dict:
+        """
+        抓取外部链接 OG 元数据：{title, description, site_name, favicon_url, preview_image}
+        超时（5s）或失败时返回空 dict。
+        """
+        ...
+```
+
+---
 
 ## 服务依赖图（更新）
 
 ```
 IPresenceService
-    ├── INotificationService（推送 App 内通知）
-    └── IExtensionService（触发 on_user_online Hook）
+    |-- INotificationService
+    |-- IExtensionService
 
 IWorkflowService
-    ├── IPresenceService（推送工作流审批通知）
-    ├── INotificationService（跨群任务通知）
-    └── knowledge_nodes/edges（上下文补全，直接 DB 访问）
+    |-- IPresenceService
+    |-- INotificationService
+    |-- knowledge_nodes/edges
 
 IExtensionService
-    ├── INotificationService（审核通知）
-    └── extension_invocation_logs（调用记录）
+    |-- INotificationService
+    |-- extension_invocation_logs
 
 ICustomFieldService
-    ├── IWorkflowService（为工作流推荐字段）
-    └── IPresenceService（推荐时通知用户）
+    |-- IWorkflowService
+    |-- IPresenceService
+
+IUserDocumentService
+    |-- ISubscriptionService
+    |-- IButlerSuggestionService
+
+ISharedLinkService
+    |-- ISubscriptionService
+    |-- IButlerSuggestionService
+
+IButlerSuggestionService
+    |-- butler_suggestions
 ```

@@ -541,9 +541,13 @@ CREATE TABLE user_subscriptions (
     id              TEXT PRIMARY KEY,
     ldap_user_id    TEXT NOT NULL,
     subscription_type TEXT NOT NULL CHECK (
-        subscription_type IN ('thread', 'category', 'keyword', 'user')
+        subscription_type IN (
+            'thread', 'category', 'keyword', 'user',
+            'todo', 'resource', 'event', 'document', 'shared_link', 'workflow'
+        )
     ),
     target_id       TEXT NOT NULL,
+    filter_criteria TEXT NOT NULL DEFAULT '{}',   -- JSON 字符串
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
 
     UNIQUE(ldap_user_id, subscription_type, target_id)
@@ -1110,3 +1114,96 @@ CREATE TABLE custom_field_values (
 
 -- butler_proposals PRD 字段（SQLite 通过迁移脚本处理）
 -- 目标新增列：prd_content TEXT, prd_format TEXT DEFAULT 'rippleflow_prd_v1', notify_devs INTEGER DEFAULT 1
+
+-- =============================================================
+-- ALTER personal_todos：支持 Plan 任务卡（todo_type + milestones）
+-- SQLite 用迁移语句描述，实际通过 MIGRATE 脚本执行
+-- =============================================================
+-- ALTER TABLE personal_todos ADD COLUMN todo_type TEXT NOT NULL DEFAULT 'task'
+--     CHECK (todo_type IN ('task', 'plan'));
+-- ALTER TABLE personal_todos ADD COLUMN milestones TEXT NOT NULL DEFAULT '[]';
+--     -- JSON 字符串：[{"title":"...", "due":"2026-04-01", "done":0}]
+
+-- =============================================================
+-- TABLE: user_documents
+-- 用户发布的富文本文档（系统内 Markdown 编辑）
+-- =============================================================
+
+CREATE TABLE IF NOT EXISTS user_documents (
+    id                        TEXT PRIMARY KEY,
+    title                     TEXT NOT NULL,
+    content                   TEXT,
+    summary                   TEXT,
+    author_id                 TEXT NOT NULL,
+    group_id                  TEXT,
+    category                  TEXT,
+    tags                      TEXT NOT NULL DEFAULT '[]',      -- JSON 数组
+    visibility                TEXT NOT NULL DEFAULT 'team'
+        CHECK (visibility IN ('private', 'followers', 'team', 'public')),
+    published_at              TEXT,
+    view_count                INTEGER NOT NULL DEFAULT 0,
+    butler_suggested_category TEXT,
+    butler_suggested_tags     TEXT NOT NULL DEFAULT '[]',      -- JSON 数组
+    source_thread_id          TEXT REFERENCES topic_threads(id) ON DELETE SET NULL,
+    created_at                TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at                TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_docs_author   ON user_documents (author_id);
+CREATE INDEX IF NOT EXISTS idx_user_docs_group    ON user_documents (group_id);
+CREATE INDEX IF NOT EXISTS idx_user_docs_category ON user_documents (category);
+
+-- =============================================================
+-- TABLE: shared_links
+-- 外部链接分享卡片（URL + OG元数据）
+-- =============================================================
+
+CREATE TABLE IF NOT EXISTS shared_links (
+    id                        TEXT PRIMARY KEY,
+    url                       TEXT NOT NULL,
+    title                     TEXT,
+    description               TEXT,
+    site_name                 TEXT,
+    favicon_url               TEXT,
+    preview_image             TEXT,
+    shared_by                 TEXT NOT NULL,
+    group_id                  TEXT,
+    category                  TEXT,
+    tags                      TEXT NOT NULL DEFAULT '[]',      -- JSON 数组
+    visibility                TEXT NOT NULL DEFAULT 'team'
+        CHECK (visibility IN ('private', 'followers', 'team', 'public')),
+    butler_suggested_category TEXT,
+    butler_suggested_tags     TEXT NOT NULL DEFAULT '[]',      -- JSON 数组
+    butler_summary            TEXT,
+    metadata_fetched_at       TEXT,
+    fetch_status              TEXT NOT NULL DEFAULT 'pending'
+        CHECK (fetch_status IN ('pending', 'success', 'failed', 'skipped')),
+    view_count                INTEGER NOT NULL DEFAULT 0,
+    created_at                TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at                TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_shared_links_sharer   ON shared_links (shared_by);
+CREATE INDEX IF NOT EXISTS idx_shared_links_group    ON shared_links (group_id);
+CREATE INDEX IF NOT EXISTS idx_shared_links_category ON shared_links (category);
+CREATE INDEX IF NOT EXISTS idx_shared_links_fetch    ON shared_links (fetch_status);
+-- =============================================================
+-- TABLE: butler_suggestions
+-- AI 智能辅助输入记录（跨切面，贯穿全系统）
+-- =============================================================
+
+CREATE TABLE IF NOT EXISTS butler_suggestions (
+    id            TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL,
+    entity_type   TEXT NOT NULL,
+    entity_id     TEXT,
+    field         TEXT NOT NULL,
+    context_hash  TEXT,
+    suggestions   TEXT NOT NULL DEFAULT '[]',    -- JSON 数组
+    applied       INTEGER NOT NULL DEFAULT 0,
+    applied_value TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_butler_sugg_entity ON butler_suggestions (entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_butler_sugg_user ON butler_suggestions (user_id);
