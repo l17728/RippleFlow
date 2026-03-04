@@ -52,6 +52,8 @@ tags:
     description: AI 管家服务
   - name: internal
     description: 内部服务接口（不对外暴露）
+  - name: logs
+    description: 日志上报与查询（客户端上报、异常监控、统计分析）
 
 # ─────────────────────────────────────────────────────────────────────
 # COMPONENTS
@@ -3938,3 +3940,448 @@ security:
           description: 无效的事件类型或载荷
         '503':
           description: nullclaw 服务不可用
+
+  # ─────────────────────────────────────────────────────────────────────
+  # 客户端日志上报接口
+  # ─────────────────────────────────────────────────────────────────────
+
+  /api/v1/logs/client:
+    post:
+      tags: [logs]
+      summary: 客户端日志上报
+      description: |
+        客户端（前端）通过此接口上报日志到服务端。
+
+        **上报策略**：
+        - **立即上报**：未捕获异常、Promise 拒绝、关键错误
+        - **定期上报**：每 60 秒检查并批量上报
+        - **阈值触发**：错误数/内存使用超过阈值时立即上报
+
+        **认证**：使用 JWT Token 或匿名上报（限制频率）
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [logs]
+              properties:
+                logs:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/ClientLogEntry'
+                immediate:
+                  type: boolean
+                  default: false
+                  description: 是否立即处理（跳过聚合）
+            example:
+              logs:
+                - timestamp: "2026-03-04T10:30:00Z"
+                  level: "error"
+                  category: "client"
+                  service: "frontend"
+                  message: "Uncaught TypeError: Cannot read property 'x' of undefined"
+                  exception_type: "js_error"
+                  stack_trace: "TypeError: Cannot read property..."
+                  details:
+                    filename: "app.js"
+                    lineno: 123
+                    colno: 45
+              immediate: true
+      responses:
+        '200':
+          description: 日志上报成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  received: { type: integer, description: "接收的日志数量" }
+                  processed: { type: integer, description: "已处理的日志数量" }
+        '400':
+          description: 日志格式无效
+        '429':
+          description: 请求过于频繁（匿名用户限制）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/logs/search:
+    get:
+      tags: [logs]
+      summary: 搜索日志
+      description: |-
+        管理员搜索系统日志。
+
+        **权限**：需要 admin 角色
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: start_time
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: 开始时间
+        - in: query
+          name: end_time
+          required: true
+          schema:
+            type: string
+            format: date-time
+          description: 结束时间
+        - in: query
+          name: level
+          schema:
+            type: string
+            enum: [debug, info, warning, error, critical]
+          description: 日志级别
+        - in: query
+          name: category
+          schema:
+            type: string
+            enum: [api_access, business, llm, exception, audit, client]
+          description: 日志分类
+        - in: query
+          name: service
+          schema:
+            type: string
+          description: 服务名称
+        - in: query
+          name: request_id
+          schema:
+            type: string
+          description: 请求 ID
+        - in: query
+          name: user_id
+          schema:
+            type: string
+          description: 用户 ID
+        - in: query
+          name: keyword
+          schema:
+            type: string
+          description: 全文搜索关键词
+        - in: query
+          name: page
+          schema:
+            type: integer
+            default: 1
+        - in: query
+          name: size
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+      responses:
+        '200':
+          description: 搜索结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+                  size:
+                    type: integer
+                  logs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LogEntry'
+        '401':
+          description: 未登录
+        '403':
+          description: 无权限（非管理员）
+
+  /api/v1/logs/exceptions:
+    get:
+      tags: [logs]
+      summary: 获取异常事件列表
+      description: |-
+        获取系统异常事件列表，用于异常监控面板。
+
+        **权限**：需要 admin 角色
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [new, acknowledged, resolved]
+          description: 异常状态
+        - in: query
+          name: severity
+          schema:
+            type: string
+            enum: [critical, error, warning]
+          description: 严重程度
+        - in: query
+          name: since
+          schema:
+            type: string
+            format: date-time
+          description: 起始时间
+      responses:
+        '200':
+          description: 异常事件列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                  exceptions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ExceptionEvent'
+
+  /api/v1/logs/exceptions/{exception_id}/acknowledge:
+    post:
+      tags: [logs]
+      summary: 确认异常
+      description: |-
+        标记异常为"已知"，停止重复通知。
+
+        **权限**：需要 admin 角色
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: exception_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                note:
+                  type: string
+                  description: 备注
+      responses:
+        '200':
+          description: 确认成功
+
+  /api/v1/logs/exceptions/{exception_id}/resolve:
+    post:
+      tags: [logs]
+      summary: 解决异常
+      description: |-
+        标记异常为"已解决"。
+
+        **权限**：需要 admin 角色
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: exception_id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resolution]
+              properties:
+                resolution:
+                  type: string
+                  description: 解决方案说明
+      responses:
+        '200':
+          description: 解决成功
+
+  /api/v1/logs/statistics:
+    get:
+      tags: [logs]
+      summary: 日志统计
+      description: |-
+        获取日志统计数据，用于监控面板。
+
+        **权限**：需要 admin 角色
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: start_time
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: end_time
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: group_by
+          schema:
+            type: string
+            enum: [category, level, service, hour]
+            default: category
+      responses:
+        '200':
+          description: 统计数据
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                  by_level:
+                    type: object
+                    additionalProperties:
+                      type: integer
+                  by_category:
+                    type: object
+                    additionalProperties:
+                      type: integer
+                  by_service:
+                    type: object
+                    additionalProperties:
+                      type: integer
+                  timeline:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        time: { type: string }
+                        count: { type: integer }
+
+
+    # ── 日志相关 Schema ───────────────────────────────────────────────
+
+    ClientLogEntry:
+      type: object
+      required: [timestamp, level, category, message]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        level:
+          type: string
+          enum: [debug, info, warning, error, critical]
+        category:
+          type: string
+          enum: [client]
+          description: 客户端日志固定为 client
+        service:
+          type: string
+          default: frontend
+        message:
+          type: string
+          description: 日志消息
+        details:
+          type: object
+          description: 详细信息
+        session_id:
+          type: string
+          description: 会话 ID
+        user_id:
+          type: string
+          description: 用户 ID（已登录时）
+        exception_type:
+          type: string
+          description: 异常类型（如 js_error, promise_rejection）
+        stack_trace:
+          type: string
+          description: 堆栈信息
+
+    LogEntry:
+      type: object
+      properties:
+        id:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        level:
+          type: string
+          enum: [debug, info, warning, error, critical]
+        category:
+          type: string
+          enum: [api_access, business, llm, exception, audit, client]
+        service:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+        request_id:
+          type: string
+        user_id:
+          type: string
+        session_id:
+          type: string
+        client_ip:
+          type: string
+        duration_ms:
+          type: integer
+        exception_type:
+          type: string
+        stack_trace:
+          type: string
+
+    ExceptionEvent:
+      type: object
+      properties:
+        id:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        severity:
+          type: string
+          enum: [critical, error, warning]
+        exception_type:
+          type: string
+        exception_message:
+          type: string
+        stack_trace:
+          type: string
+        context:
+          type: object
+        request_id:
+          type: string
+        user_id:
+          type: string
+        affected_count:
+          type: integer
+          description: 影响次数
+        first_occurred:
+          type: string
+          format: date-time
+        last_occurred:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [new, acknowledged, resolved]
+        acknowledged_by:
+          type: string
+        acknowledged_at:
+          type: string
+          format: date-time
+        resolved_by:
+          type: string
+        resolved_at:
+          type: string
+          format: date-time
+        resolution:
+          type: string
