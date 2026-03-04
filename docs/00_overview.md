@@ -146,10 +146,10 @@ Agent 从「执行者」变成「运营者」
 | 03 | [API 规范](./03_api_reference.yaml) | OpenAPI 3.0，全部 RESTful 接口 | SDD / TDD / E2E |
 | 04 | [服务层接口](./04_service_interfaces.md) | Python Protocol 定义，供 UT mock | TDD |
 | 05 | [E2E 测试目录](./05_e2e_test_catalog.md) | 用例清单（函数调用式）+ Playwright 结构 | ST / E2E |
-| 06 | [LLM Prompt 模板库](./06_llm_prompt_templates.md) | Stage 0–5 + Q&A + 纪要生成 + 管家 Prompt | 开发 / 调优 |
+| 06 | [LLM Prompt 模板库](./06_llm_prompt_templates.md) | Stage 0–5 + Q&A + 纪要生成 + 管家 Prompt + PRD生成 + 工作流学习 | 开发 / 调优 |
 | 07 | [单元测试目录](./07_unit_test_catalog.md) | 服务层 UT 用例清单，pytest + AsyncMock | TDD |
-| 08 | [AI 管家演化架构](./08_ai_butler_architecture.md) | 权限层级、自我演化机制、主动服务清单 | SDD |
-| 09 | [用户手册](./09_user_manual.md) | 系统使用指南、使用场景演练、FAQ 功能说明 | 用户 / 产品 |
+| 08 | [AI 管家演化架构](./08_ai_butler_architecture.md) | 权限层级、自我演化机制、工作流托管、跨群任务分发、PRD上报 | SDD |
+| 09 | [用户手册](./09_user_manual.md) | 系统使用指南、使用场景演练、真实用户完整时序、AI管家操作手册 | 用户 / 产品 |
 | 10 | [设计一致性报告](./10_design_consistency_report.md) | 文档一致性验证、架构完整性检查（v0.6 基准） | 审查 |
 | 11 | [专家评审报告](./11_expert_review_report.md) | 设计优化建议、性能风险评估 | 审查 |
 | PRD | [FAQ 知识沉淀系统 PRD](./群聊知识沉淀与FAQ智能演进系统_PRD.md) | FAQ 自动生成、演进机制、里程碑与 KPI | 产品 / 开发 |
