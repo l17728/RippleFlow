@@ -11,7 +11,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python D:\\RippleFlow\\.claude\\hooks\\post_edit_check.py"
+            "command": "python D:/RippleFlow/scripts/post_edit_check.py"
           }
         ]
       }
@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python D:\\RippleFlow\\.claude\\hooks\\stop_reminder.py"
+            "command": "python D:/RippleFlow/scripts/stop_reminder.py"
           }
         ]
       }
