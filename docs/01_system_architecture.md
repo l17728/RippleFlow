@@ -2881,7 +2881,9 @@ GET /api/v1/knowledge/graph/edge-types:
 
 ### 20.1 概念
 
-行为分析模块挖掘用户行为模式，用于个性化推荐、工作量评估、知识贡献分析。
+行为分析模块分为两层：
+- **数据采集层（RippleFlow 机制）**：记录用户行为日志，提供统计查询 API
+- **模式分析层（nullclaw 策略）**：挖掘行为模式、生成推荐、评估贡献——所有涉及"理解和判断"的部分由 nullclaw 通过 API 查询后完成
 
 ### 20.2 行为数据表
 
@@ -2917,7 +2919,9 @@ CREATE INDEX idx_behavior_type ON user_behavior_logs(behavior_type);
 
 ### 20.3 行为分析维度
 
-| 维度 | 指标 | 应用 |
+> **执行主体说明**：下表中"应用"列的推荐、评估、优化行为，均由 **nullclaw** 通过查询行为分析 API 后决策实施，RippleFlow 平台只负责数据聚合和 API 暴露。
+
+| 维度 | 指标 | 应用（由 nullclaw 实施） |
 |------|------|------|
 | **活跃时段** | 各小时活跃度 | 推送时机优化 |
 | **搜索模式** | 高频搜索词 | 推荐内容 |
@@ -2956,6 +2960,10 @@ GET /api/v1/analytics/team/overview:
 
 ## 21. 热点分析与闭环状态（新增）
 
+热点分析模块分为两层：
+- **数值计算层（RippleFlow 机制）**：基于消息数、参与人数、新鲜度等统计指标计算热度分，由 nullclaw cron 定期触发 `POST /api/v1/analytics/heat/calculate` 写入 `topic_heat_scores` 表
+- **洞察与推送层（nullclaw 策略）**：解读热度数据、识别异常趋势、决定推送对象和时机
+
 热点分析模块帮助用户快速了解：
 - **热点话题**：哪些话题正在被频繁讨论
 - **活跃人员**：谁最活跃、贡献最多
@@ -2993,7 +3001,10 @@ CREATE INDEX idx_heat_thread ON topic_heat_scores(thread_id);
 
 ### 21.3 热度计算公式
 
+> **执行主体**：热度计算是纯数值统计（无自然语言理解），由 RippleFlow 平台提供计算接口，**nullclaw cron** 定期触发调用（每小时或每天），结果写入 `topic_heat_scores` 表。
+
 ```python
+# RippleFlow 平台侧热度计算逻辑（由 nullclaw 触发调用）
 def calculate_heat_score(thread, date):
     """
     话题热度计算
@@ -3538,8 +3549,11 @@ GET /api/v1/chain/support-network:
 
 ### 23.2 瓶颈识别规则
 
+> **执行主体**：瓶颈识别逻辑（包括判断"是否超期"、"是否阻塞"、"建议行动"）属于策略决策，由 **nullclaw** 定期执行（通过 cron Routine），查询 RippleFlow 平台 API 后由 LLM 综合判断。下方为 nullclaw 侧 Routine 的逻辑示意（非平台代码）。
+
 ```python
-# 瓶颈识别服务
+# nullclaw 侧瓶颈识别 Routine 逻辑示意（伪代码）
+# 实际运行在 nullclaw，通过调用 RippleFlow REST API 获取数据
 class BottleneckDetector:
 
     def detect_bottlenecks(self):
@@ -3696,9 +3710,11 @@ CREATE INDEX idx_bottleneck_unresolved ON bottleneck_records(severity, first_det
 
 ## 24. 资源需求与支持关系提取（新增）
 
+> **执行主体**：资源需求和支持关系的语义识别属于 AI 决策行为，由 **nullclaw** 在收到话题处理完成事件后通过 LLM 提取，并调用平台 API 写入知识图谱。RippleFlow Stage 4 流水线**不**包含此逻辑。
+
 ### 24.1 资源需求提取模式
 
-在 Stage 4 结构化提取中，增加资源需求提取：
+nullclaw 使用以下模式对话题摘要进行分析，识别资源需求：
 
 ```yaml
 # Stage 4 资源需求提取规则
