@@ -416,12 +416,14 @@ async def select_model(stage: str, content: str, context: dict) -> str:
 
 ### 3.2 全文检索性能优化
 
+> ⚠️ **重要说明**：RippleFlow 的核心架构约束是**不使用向量数据库/embedding 检索**（见 `00_overview.md` 设计约束）。本节的方案 B（混合检索/embedding）和向量数据库建议（方案 A 阶段 3）仅作为未来可选优化路径的参考，**不代表当前架构决策**。若未来确实需要引入，须在团队评审后再决策。当前推荐方案 A 阶段 1-2 和方案 C（索引优化）。
+
 #### 问题分析
 ```
-当前方案: PostgreSQL pg_trgm + tsvector
+当前方案: PostgreSQL pg_trgm + tsvector（或 SQLite FTS5）
 - 适合: 数据量<100万条
 - 风险: 数据量增长后性能急剧下降
-- 问题: 不支持语义搜索
+- 问题: 不支持语义搜索（但通过 LLM 综合回答可一定程度弥补）
 
 未来痛点:
 - 10人团队1年可能产生10-20万条消息

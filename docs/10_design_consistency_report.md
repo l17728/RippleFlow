@@ -1,14 +1,28 @@
 # RippleFlow 设计文档一致性检查报告
 
+> ⚠️ **过期提示**：本报告基于 2026-03-03 的文档状态（v0.6 基准）。
+> 以下文档在此之后有重要更新，本报告未覆盖：
+> - `09_user_manual.md`：修正 Stage 5 归属，新增 FAQ 知识库场景
+> - `03_api_reference.yaml`：新增 9 个 FAQ API 端点和 6 个日志 API 端点
+> - `02_database_ddl.sql / 02b`：新增 FAQ 四张表（faq_documents/sections/items/versions）
+> - `06_llm_prompt_templates.md`：新增 §19-21 FAQ 生成/相似度/质量评估 Prompt
+> - `07_unit_test_catalog.md`：新增 §19 FaqService 单元测试
+> - `05_e2e_test_catalog.md`：新增 §Part 5b FAQ E2E 测试
+> - `04_service_interfaces.md`：新增 §21 IFaqService 接口定义
+> - `群聊知识沉淀与FAQ智能演进系统_PRD.md`：新增完整 FAQ 系统 PRD (v1.2)
+>
+> **建议**：在下一个里程碑（FAQ MVP 验收后）基于最新文档重新运行一致性检查。
+
 ## 检查信息
 
 | 项目 | 值 |
 |------|------|
 | 检查日期 | 2026-03-03 |
-| 检查范围 | 全部 12 份设计文档 |
+| 检查范围 | 全部 12 份设计文档（v0.6 基准） |
 | 检查目的 | 确保设计一致性和逻辑闭环 |
 | 当前版本 | v0.6 (架构重构) |
 | 最后更新 | 2026-03-03 |
+| **有效期** | **已过期，见上方提示** |
 
 ---
 

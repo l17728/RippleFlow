@@ -1998,3 +1998,270 @@ AIButlerService
     ├── SubscriptionService
     └── AuthService
 ```
+
+---
+
+## 21. FaqService（FAQ 知识库服务 - 新增）
+
+> **归属**：RippleFlow 平台层，提供 FAQ CRUD + 审核 + 搜索接口
+> **调用方**：nullclaw（写入/更新）+ Web Dashboard（查询）+ BotAdapterService（问答引用）
+> **职责**：仅提供存储与查询机制，不含生成策略（策略由 nullclaw 决定）
+
+```python
+from typing import Protocol, TypedDict
+from uuid import UUID
+from datetime import datetime
+
+
+class FaqItemDTO(TypedDict):
+    """FAQ 条目数据传输对象"""
+    id: UUID
+    section_id: UUID
+    question: str
+    answer: str
+    question_variants: list[str]          # 相似问法
+    source_threads: list[str]             # 来源 thread_id 列表
+    confidence: float                     # AI 置信度 (0-1)
+    view_count: int
+    helpful_count: int
+    review_status: str                    # pending | confirmed | rejected
+    reviewed_by: str | None
+    reviewed_at: datetime | None
+    created_by: str                       # 'nullclaw' | user_id
+    created_at: datetime
+    updated_at: datetime
+
+
+class FaqSectionDTO(TypedDict):
+    """FAQ 章节数据传输对象"""
+    id: UUID
+    doc_id: UUID
+    parent_id: UUID | None
+    title: str
+    sort_order: int
+    items: list[FaqItemDTO]              # 该章节下的条目
+
+
+class FaqDocumentDTO(TypedDict):
+    """FAQ 文档（每群一份）"""
+    id: UUID
+    group_id: str
+    version: int
+    qa_count: int
+    updated_at: datetime
+    sections: list[FaqSectionDTO]
+
+
+class FaqVersionDTO(TypedDict):
+    """FAQ 变更历史条目"""
+    id: UUID
+    item_id: UUID
+    version: int
+    question: str
+    answer: str
+    change_type: str                      # created | updated | merged | reviewed | rejected
+    change_by: str
+    change_reason: str | None
+    created_at: datetime
+
+
+class IFaqService(Protocol):
+    """FAQ 知识库服务接口
+    
+    RippleFlow 平台提供 FAQ 存储和查询机制，所有 AI 生成策略由 nullclaw 在外部决定。
+    nullclaw 通过调用本接口的 create_item / update_item / merge_items 写入 FAQ 内容。
+    """
+
+    # ── 文档与章节 ─────────────────────────────────────────────────────────
+
+    async def get_document(
+        self,
+        group_id: str,
+        caller_role: str = "member",      # member | admin
+    ) -> FaqDocumentDTO:
+        """获取群 FAQ 文档（章节树 + 基本统计）
+        
+        member 只能看到 review_status=confirmed 的条目。
+        admin 可见全部状态条目（pending/confirmed/rejected）。
+        """
+        ...
+
+    async def ensure_section(
+        self,
+        doc_id: UUID,
+        title: str,
+        parent_id: UUID | None = None,
+    ) -> UUID:
+        """获取或创建指定标题的章节，返回 section_id
+        
+        若已存在同标题章节则直接返回，不重复创建。
+        nullclaw 在写入 FAQ 前调用以确定归属章节。
+        """
+        ...
+
+    # ── FAQ 条目 CRUD ───────────────────────────────────────────────────────
+
+    async def create_item(
+        self,
+        section_id: UUID,
+        question: str,
+        answer: str,
+        source_threads: list[str],
+        created_by: str = "nullclaw",
+        question_variants: list[str] | None = None,
+        confidence: float = 0.8,
+    ) -> FaqItemDTO:
+        """创建 FAQ 条目，默认 review_status=pending
+        
+        写入后自动创建 faq_versions 初始快照（change_type=created）。
+        """
+        ...
+
+    async def get_item(
+        self,
+        item_id: UUID,
+        caller_role: str = "member",
+    ) -> FaqItemDTO:
+        """获取单条 FAQ 条目
+        
+        member 只能获取 confirmed 状态条目，否则抛 PermissionError。
+        """
+        ...
+
+    async def update_item(
+        self,
+        item_id: UUID,
+        question: str | None = None,
+        answer: str | None = None,
+        question_variants: list[str] | None = None,
+        source_threads: list[str] | None = None,
+        confidence: float | None = None,
+        change_by: str = "nullclaw",
+        change_reason: str = "",
+    ) -> FaqItemDTO:
+        """更新 FAQ 条目，自动创建版本快照（change_type=updated）"""
+        ...
+
+    async def merge_items(
+        self,
+        source_ids: list[UUID],
+        target: dict,                     # {question, answer, question_variants}
+        merge_by: str = "nullclaw",
+        merge_reason: str = "",
+    ) -> FaqItemDTO:
+        """合并多条重复 FAQ，保留所有 source_threads，删除原始条目"""
+        ...
+
+    # ── 审核 ────────────────────────────────────────────────────────────────
+
+    async def review_item(
+        self,
+        item_id: UUID,
+        reviewer_id: str,
+        action: str,                      # confirm | reject
+        reason: str = "",
+    ) -> FaqItemDTO:
+        """管理员审核 FAQ 条目
+        
+        confirm: review_status → confirmed，对普通用户可见
+        reject:  review_status → rejected，从普通用户视图隐藏
+        自动创建 faq_versions 快照（change_type=reviewed/rejected）。
+        """
+        ...
+
+    async def list_pending_review(
+        self,
+        group_id: str,
+        page: int = 1,
+        size: int = 20,
+    ) -> tuple[list[FaqItemDTO], int]:
+        """获取待审核 FAQ 队列（仅管理员调用）"""
+        ...
+
+    # ── 搜索与查询 ──────────────────────────────────────────────────────────
+
+    async def list_items(
+        self,
+        group_id: str,
+        section_id: UUID | None = None,
+        caller_role: str = "member",
+        page: int = 1,
+        size: int = 20,
+        sort_by: str = "view_count",      # view_count | updated_at | confidence
+    ) -> tuple[list[FaqItemDTO], int]:
+        """分页获取 FAQ 条目，member 只见 confirmed"""
+        ...
+
+    async def search(
+        self,
+        group_id: str,
+        query: str,
+        caller_role: str = "member",
+        limit: int = 10,
+    ) -> list[FaqItemDTO]:
+        """FAQ 全文搜索，使用 PostgreSQL tsvector / SQLite FTS5
+        
+        返回按相关度排序的结果，member 只见 confirmed 条目。
+        """
+        ...
+
+    # ── 反馈与统计 ──────────────────────────────────────────────────────────
+
+    async def submit_feedback(
+        self,
+        item_id: UUID,
+        user_id: str,
+        feedback_type: str,               # helpful | unhelpful
+        comment: str = "",
+    ) -> None:
+        """提交用户反馈，更新 helpful_count / view_count"""
+        ...
+
+    async def increment_view_count(
+        self,
+        item_id: UUID,
+    ) -> None:
+        """查看 FAQ 条目时调用，递增 view_count"""
+        ...
+
+    # ── 版本历史 ────────────────────────────────────────────────────────────
+
+    async def get_versions(
+        self,
+        item_id: UUID,
+    ) -> list[FaqVersionDTO]:
+        """获取 FAQ 条目的完整变更历史，按版本号降序"""
+        ...
+```
+
+### 接口约束说明
+
+| 约束 | 说明 |
+|------|------|
+| **权限隔离** | member 只能读取 `confirmed` 条目；admin 可读写全部 |
+| **版本快照** | `create_item`、`update_item`、`review_item`、`merge_items` 均自动写入 `faq_versions` |
+| **nullclaw 权限** | nullclaw 持有 `bot_token`，可调用 `create_item`、`update_item`、`merge_items` |
+| **审核前不公开** | 默认 `pending`，管理员 `confirm` 后才对普通用户可见 |
+| **无向量检索** | `search` 方法使用全文检索（PostgreSQL FTS / SQLite FTS5），不使用 embedding |
+
+---
+
+## 22. 接口依赖关系图（含 FaqService）
+
+```
+FaqService
+    └── (纯存储层，无外部依赖)
+
+BotAdapterService
+    ├── FaqService          ← 新增（机器人问答优先引用 FAQ）
+    ├── SearchService
+    ├── LLMService
+    ├── PersonalTodoService
+    └── AuthService
+
+AIButlerService（nullclaw 通过 HTTP 调用平台 API，非直接依赖）
+    ├── POST /api/v1/faq/items        ← 写入 FAQ
+    ├── PUT  /api/v1/faq/items/{id}   ← 更新 FAQ
+    ├── POST /api/v1/faq/items/merge  ← 合并 FAQ
+    └── GET  /api/v1/faq/{group_id}/search ← 查询现有 FAQ
+```
