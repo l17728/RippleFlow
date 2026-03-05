@@ -887,9 +887,12 @@ CREATE TABLE nullclaw_pending_events (
     event_type      TEXT NOT NULL
                     CHECK (event_type IN ('message_processed', 'thread_updated', 'sensitive_resolved')),
     thread_id       TEXT,                      -- GAP-11: 顶级 thread_id，支持按线索分组顺序重放
+    -- D-03: 多线索消息拆分后共享的批次 ID（单线索事件为 NULL）
+    batch_id        TEXT,                      -- D-03: batch_id，同批次拆分记录共享
     payload         TEXT NOT NULL DEFAULT '{}', -- JSON 格式
-    -- 单线索：{"thread_id":"...", "category":"...", "new_message_ids":["..."], "is_new_thread":1}
-    -- 多线索：{"message_id":"...", "thread_updates":[{"thread_id":"...", "category":"...", "is_new_thread":1}]}
+    -- D-03 修复后 payload 统一为单线索格式：
+    -- {"thread_id":"...", "category":"...", "new_message_ids":["..."], "is_new_thread":1}
+    -- 多线索消息拆分为 N 条记录，每条 payload 独立，batch_id 相同
     status          TEXT NOT NULL DEFAULT 'pending'
                     CHECK (status IN ('pending', 'delivered', 'failed', 'expired')),
     retry_count     INTEGER NOT NULL DEFAULT 0,
@@ -904,6 +907,9 @@ CREATE INDEX idx_pending_events_retry ON nullclaw_pending_events (next_retry_at)
 CREATE INDEX idx_pending_events_status ON nullclaw_pending_events (status, created_at DESC);
 CREATE INDEX idx_pending_events_thread ON nullclaw_pending_events (thread_id, created_at)
     WHERE status = 'pending';
+-- D-03 新增：按 batch_id 查询同批次拆分记录
+CREATE INDEX idx_pending_events_batch ON nullclaw_pending_events (batch_id)
+    WHERE batch_id IS NOT NULL;
 
 -- =============================================================
 -- 消息处理死信队列（P1-2）

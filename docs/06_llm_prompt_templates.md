@@ -2854,3 +2854,72 @@ messages = [
 | `authorized_by` 只写 user_id，不写姓名 | 保护个人隐私，后续展示层再做映射 |
 | 上下文通过 `run(stage_context=...)` 参数传递 | 由 Celery task kwargs 序列化，重试时随 task 参数一同保留 |
 | Stage2-4 不额外注入 | 授权上下文仅作用于 Stage1，后续 Stage 按正常流程处理 |
+
+---
+
+## §27 关键词订阅匹配策略与 zhparser 升级路径（D-04）
+
+> **背景**：`user_subscriptions.subscription_type = 'keyword'` 的匹配依赖 PostgreSQL 全文检索。
+> 当前使用 `'simple'` 词典（不做词干还原、不做中文分词），中文关键词匹配精度偏低。
+
+### 27.1 当前实现
+
+```sql
+-- searchable_text 字段的 tsvector 构建（publish_event 写入时）
+to_tsvector('simple', searchable_text)
+
+-- keyword 订阅匹配查询（ISubscriptionService 内部）
+WHERE to_tsvector('simple', s.searchable_text) @@ plainto_tsquery('simple', keyword)
+```
+
+**限制**：
+- `'simple'` 词典将文本按空格/标点切分，中文字符串不分词
+- 例：关键词 "数据库" 无法匹配 "这是一个数据库优化讨论"（因为整串当作一个 token）
+- 英文关键词匹配不受影响（空格天然分隔）
+
+### 27.2 zhparser 升级路径
+
+部署 [zhparser](https://github.com/amutu/zhparser) PostgreSQL 扩展后，切换为 `'chinese'` 字典：
+
+```sql
+-- 安装扩展（DBA 执行）
+CREATE EXTENSION zhparser;
+CREATE TEXT SEARCH CONFIGURATION chinese (PARSER = zhparser);
+ALTER TEXT SEARCH CONFIGURATION chinese
+    ADD MAPPING FOR n, v, a, i, e, l WITH simple;
+
+-- 切换后的 tsvector 构建
+to_tsvector('chinese', searchable_text)
+
+-- 切换后的匹配查询
+WHERE to_tsvector('chinese', s.searchable_text) @@ plainto_tsquery('chinese', keyword)
+```
+
+**迁移步骤**：
+1. 安装 zhparser，创建 `chinese` TEXT SEARCH CONFIGURATION
+2. 重建 `searchable_text` 的 GIN 索引：`REINDEX INDEX CONCURRENTLY idx_*_searchable`
+3. 批量刷新历史数据的 `searchable_text` tsvector（可分批执行，不影响在线查询）
+4. 将代码中所有 `'simple'` 替换为 `'chinese'`（仅限 keyword 订阅匹配逻辑）
+
+**注意**：Stage 2 分类、FAQ 搜索等场景的 `searchable_text` 写入逻辑不受影响，
+仅 `ISubscriptionService` 的 keyword 匹配查询需切换词典。
+
+### 27.3 过渡期兼容方案
+
+在 zhparser 未就绪时，可通过以下降级方案提升中文匹配精度：
+
+```python
+# ISubscriptionService 内：对中文关键词增加 LIKE 降级匹配
+async def _match_keyword_subscriptions(self, searchable_text: str, keyword: str) -> bool:
+    # 主路径：FTS（英文精确，中文有限）
+    fts_match = await db.fetchval(
+        "SELECT to_tsvector('simple', $1) @@ plainto_tsquery('simple', $2)",
+        searchable_text, keyword
+    )
+    if fts_match:
+        return True
+    # 降级路径：LIKE 包含匹配（中文兜底，性能稍低）
+    return keyword in searchable_text
+```
+
+> **实施建议**：Phase 1 使用降级方案（LIKE 兜底），Phase 2 或 Phase 3 部署 zhparser 后切换正式 FTS。

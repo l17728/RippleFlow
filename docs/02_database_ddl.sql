@@ -2159,14 +2159,14 @@ CREATE TABLE nullclaw_pending_events (
     event_type      VARCHAR(50) NOT NULL
                     CHECK (event_type IN ('message_processed', 'thread_updated', 'sensitive_resolved')),
     -- GAP-11 修复：新增 thread_id 顶级字段，支持 RetryWorker 按线索分组、按时序重放
-    -- 单线索事件：payload.thread_id 的快捷访问
-    -- 多线索事件（多分类消息）：填写第一个线索 ID（其余在 payload.thread_updates[] 中）
+    -- D-03 修复：多线索消息不再填 thread_updates[0].thread_id，而是拆分为 N 条记录，每条独立 thread_id
     thread_id       UUID,                        -- 关联线索 ID（可为空，如 sensitive_resolved 无线索）
+    -- D-03 修复：batch_id 标记同一次多线索拆分的所有子记录，便于追踪和幂等检查
+    batch_id        UUID,                        -- 批次 ID（多线索消息拆分后共享；单线索事件为 NULL）
     payload         JSONB NOT NULL DEFAULT '{}',
-    -- GAP-5 修复：payload 结构支持多线索（多分类消息）：
-    -- 单线索：{"thread_id":"...", "category":"...", "new_message_ids":["..."], "is_new_thread":true}
-    -- 多线索：{"message_id":"...", "thread_updates":[{"thread_id":"...", "category":"...", "is_new_thread":bool}, ...]}
-    -- RetryWorker 检测 payload 中是否有 thread_updates 数组来区分单/多线索
+    -- D-03 修复后 payload 结构统一为单线索格式：
+    -- {"thread_id":"...", "category":"...", "new_message_ids":["..."], "is_new_thread":bool}
+    -- 多线索消息拆分为 N 条记录，每条 payload 独立描述一个线索，batch_id 相同
     status          VARCHAR(20) NOT NULL DEFAULT 'pending'
                     CHECK (status IN ('pending', 'delivered', 'failed', 'expired')),
     retry_count     INTEGER NOT NULL DEFAULT 0,
@@ -2183,10 +2183,15 @@ CREATE INDEX idx_pending_events_status ON nullclaw_pending_events (status, creat
 CREATE INDEX idx_pending_events_thread ON nullclaw_pending_events (thread_id, created_at ASC)
     WHERE status = 'pending' AND thread_id IS NOT NULL;
 -- 用途：RetryWorker 重放时，同一线索的事件按 created_at 升序处理，保证摘要更新顺序
+-- D-03 新增索引：按 batch_id 查询同批次所有拆分记录（监控/幂等用）
+CREATE INDEX idx_pending_events_batch ON nullclaw_pending_events (batch_id)
+    WHERE batch_id IS NOT NULL;
 
 COMMENT ON TABLE nullclaw_pending_events IS 'nullclaw 事件推送待处理队列：推送失败时暂存，后台重试';
 COMMENT ON COLUMN nullclaw_pending_events.thread_id IS
     'GAP-11修复：顶级thread_id字段，RetryWorker按线索分组后按时序重放，保证摘要更新顺序正确';
+COMMENT ON COLUMN nullclaw_pending_events.batch_id IS
+    'D-03修复：多线索消息拆分后的批次标识。同一消息的N个线索拆分为N条记录，共享同一batch_id（单线索为NULL）';
 
 -- =============================================================
 -- 消息处理死信队列（P1-2）

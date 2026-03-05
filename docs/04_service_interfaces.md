@@ -1439,7 +1439,8 @@ class IAIButlerService(Protocol):
         RippleFlow 平台在业务操作完成后，通过此方法推送事件到 nullclaw。
         返回推送是否成功（True=直接投递成功，False=已进入待处理队列）。
 
-        支持的事件类型及 Payload 格式：
+        支持的事件类型及 Payload 格式（D-03 修复：多线索消息拆分为 N 条记录）：
+
         - message_processed（单线索消息，Stage 0-4 完成）：
             {
               "event_type": "message_processed",
@@ -1448,18 +1449,21 @@ class IAIButlerService(Protocol):
               "new_message_ids": ["<UUID>"],
               "is_new_thread": true | false
             }
-        - message_processed（多线索消息，GAP-5 修复）：
+          降级时写入 1 条 pending_event，thread_id = payload["thread_id"]，batch_id = NULL。
+
+        - message_processed（多线索消息，D-03 修复）：
+          当消息归属多个 category（各自生成 topic_thread），notify_nullclaw() 内部将其
+          **拆分为 N 次独立调用**（每个 thread 一次），每次 payload 均为单线索格式：
             {
               "event_type": "message_processed",
-              "message_id": "<UUID>",
-              "thread_updates": [
-                {"thread_id": "<UUID>", "category": "<cat>", "is_new_thread": true},
-                {"thread_id": "<UUID>", "category": "<cat>", "is_new_thread": false}
-              ]
+              "thread_id": "<UUID>",          # 本线索 ID
+              "category": "<cat>",
+              "new_message_ids": ["<UUID>"],
+              "is_new_thread": true | false
             }
-          当消息归属多个 category（各自生成 topic_thread），使用 thread_updates 数组格式。
-          thread_id 字段（单线索格式的顶层字段）写入 nullclaw_pending_events.thread_id，
-          多线索格式写入 thread_updates[0].thread_id（主线索，用于重试有序性）。
+          降级时写入 N 条 pending_event，各自 thread_id 独立，共享同一 batch_id（UUID）。
+          **优势**：每个线索的事件有序性完全独立保证，不存在 thread_updates[0] 与
+          thread_updates[1] 之间的重试竞态问题（D-03 问题根因消除）。
 
         - thread_updated：
             {"event_type": "thread_updated", "thread_id": "<UUID>", "update_type": "summary" | "status"}
@@ -1467,11 +1471,11 @@ class IAIButlerService(Protocol):
         - sensitive_resolved：
             {"event_type": "sensitive_resolved", "message_id": "<UUID>", "authorized": true}
 
-        **降级行为（P0-2）**：
+        **降级行为（P0-2，D-03 修复后）**：
         推送失败时（连接超时 / 非 2xx），事件写入 nullclaw_pending_events 表：
-          - single-thread 格式：thread_id = payload["thread_id"]
-          - multi-thread 格式：thread_id = payload["thread_updates"][0]["thread_id"]
-          - 其他事件：thread_id = NULL
+          - 单线索事件：写入 1 条，thread_id = payload["thread_id"]，batch_id = NULL
+          - 多线索消息拆分后的每条：thread_id 独立，batch_id 相同（同一 uuid4()）
+          - 其他事件（如 sensitive_resolved）：thread_id = NULL，batch_id = NULL
         后台 RetryWorker 按指数退避重试（最多 5 次，24 小时内）。
         不抛出异常——nullclaw 不可用不影响平台核心流程。
 
@@ -1513,7 +1517,7 @@ class IAIButlerService(Protocol):
 
 ---
 
-## 14. 异常类型
+## 附录 A. 异常类型定义
 
 ```python
 # rippleflow/domain/exceptions.py
@@ -1560,7 +1564,7 @@ class InvalidTokenError(AuthenticationError):
 
 ---
 
-## 13. 接口依赖关系图
+## 附录 B. 接口依赖关系图（v0.5）
 
 ```
 ProcessingPipelineService
@@ -1951,7 +1955,7 @@ class IPersonalTodoService(Protocol):
 
 ---
 
-## 16. 接口依赖关系图（更新）
+## 附录 C. 接口依赖关系图（v0.6 更新）
 
 ```
 ProcessingPipelineService
@@ -2000,7 +2004,7 @@ ExceptionNotificationService
 
 ---
 
-## 17. LogService（日志服务 - 新增）
+## 16. LogService（日志服务）
 
 ```python
 class LogEntry(TypedDict):
@@ -2142,7 +2146,7 @@ class ILogService(Protocol):
 
 ---
 
-## 18. ExceptionNotificationService（异常通知服务 - 新增）
+## 17. ExceptionNotificationService（异常通知服务）
 
 ```python
 class NotificationChannel(TypedDict):
@@ -2223,7 +2227,7 @@ class IExceptionNotificationService(Protocol):
 
 ---
 
-## 19. ButlerPushConfigService（管家推送配置服务 - GAP-15 新增）
+## 18. ButlerPushConfigService（管家推送配置服务）
 
 ```python
 # rippleflow/services/interfaces/butler_push_config_service.py
@@ -2292,7 +2296,7 @@ class IButlerPushConfigService(Protocol):
 
 ---
 
-## 20. 配置项定义（新增）
+## 附录 D. 配置项定义
 
 ```python
 class LogConfig(TypedDict):
@@ -2334,7 +2338,7 @@ class NotificationConfig(TypedDict):
 
 ---
 
-## 20. 接口依赖关系图（最终版）
+## 附录 E. 接口依赖关系图（v0.7 最终版）
 
 ```
 LogService
@@ -2360,7 +2364,7 @@ AIButlerService
 
 ---
 
-## 21. FaqService（FAQ 知识库服务 - 新增）
+## 19. FaqService（FAQ 知识库服务）
 
 > **归属**：RippleFlow 平台层，提供 FAQ CRUD + 审核 + 搜索接口
 > **调用方**：nullclaw（写入/更新）+ Web Dashboard（查询）+ BotAdapterService（问答引用）
@@ -2659,7 +2663,7 @@ class IFaqService(Protocol):
 
 ---
 
-## 22. 接口依赖关系图（含 FaqService）
+## 附录 F. 接口依赖关系图（含 FaqService）
 
 ```
 FaqService
@@ -2682,7 +2686,7 @@ AIButlerService（nullclaw 通过 HTTP 调用平台 API，非直接依赖）
 
 ---
 
-## 17. IPresenceService
+## 20. IPresenceService
 
 ```python
 # rippleflow/services/interfaces/presence_service.py
@@ -2762,7 +2766,7 @@ class IPresenceService(Protocol):
 
 ---
 
-## 18. IWorkflowService
+## 21. IWorkflowService
 
 ```python
 # rippleflow/services/interfaces/workflow_service.py
@@ -2893,7 +2897,7 @@ class IWorkflowService(Protocol):
 
 ---
 
-## 19. IExtensionService
+## 22. IExtensionService
 
 ```python
 # rippleflow/services/interfaces/extension_service.py
@@ -2989,7 +2993,7 @@ class IExtensionService(Protocol):
 
 ---
 
-## 20. ICustomFieldService
+## 23. ICustomFieldService
 
 ```python
 # rippleflow/services/interfaces/custom_field_service.py
@@ -3072,7 +3076,7 @@ class ICustomFieldService(Protocol):
 ---
 ---
 
-## 20. UserDocumentService
+## 24. IUserDocumentService
 
 ```python
 # rippleflow/services/interfaces/user_document_service.py
@@ -3176,7 +3180,7 @@ class IUserDocumentService(Protocol):
 
 ---
 
-## 21. SharedLinkService
+## 25. ISharedLinkService
 
 ```python
 # rippleflow/services/interfaces/shared_link_service.py
@@ -3280,7 +3284,7 @@ class ISharedLinkService(Protocol):
 
 ---
 
-## 22. ButlerSuggestionService
+## 26. IButlerSuggestionService
 
 ```python
 # rippleflow/services/interfaces/butler_suggestion_service.py
@@ -3410,7 +3414,7 @@ class IButlerSuggestionService(Protocol):
 
 ---
 
-## 服务依赖图（更新）
+## 附录 G. 服务依赖图（v0.7 更新）
 
 ```
 IPresenceService
