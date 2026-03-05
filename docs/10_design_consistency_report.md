@@ -210,15 +210,15 @@
 | `06_llm_prompt_templates.md` | §26 SENSITIVE_AUTH_CONTEXT_TEMPLATE（GAP-2 对应） | ✅ 已完成 |
 | `11_expert_review_report.md` | §十三 v0.7/v0.8 补充审查（评分/建议落地/新风险） | ✅ 已完成 |
 
-### 5.2 设计层面遗留问题
+### 5.2 设计层面遗留问题（已全部处理）
 
-| 编号 | 问题 | 影响 | 建议处理 |
+| 编号 | 问题 | 影响 | 处理结果 |
 |------|------|------|----------|
-| D-01 | `04_service_interfaces.md` 中章节编号存在重复（多个 §13/§14/§17-§20），历史追加导致的混乱 | 可读性 | 下次重大更新时统一重排章节号 |
-| D-02 | `action-items` 与 `action_items` 两个 Tag 同时存在于 API spec（连字符 vs 下划线） | API 文档一致性 | 统一为 `action-items`（REST 惯例） |
-| D-03 | `nullclaw_pending_events` 中多线索格式事件（`thread_updates` 数组）写入 `thread_id` 时只取 `[0].thread_id`，若第一个线索重试先于第二个完成，可能破坏第二个线索的有序性 | 边缘场景 | 多线索事件考虑拆分为多条 pending_event 记录（每线索一条）|
-| D-04 | `keyword` 订阅匹配使用 `'simple'` 字典（兼容性优先），中文匹配精度低 | 功能质量 | 部署 zhparser 扩展后改用 `'chinese'` 字典，在 `06_llm_prompt_templates.md` 补充说明 |
-| D-05 | `butler_push_config.schedule` 字段为自定义 cron 覆盖，但 nullclaw 的内置 cron 如何与之协调未明确 | 调度一致性 | 在 `08_ai_butler_architecture.md` 补充调度优先级说明：config.schedule > nullclaw 默认 cron |
+| D-01 | `04_service_interfaces.md` 中章节编号存在重复（多个 §13/§14/§17-§20），历史追加导致的混乱 | 可读性 | ✅ 已完成：§0-§26 连续编号，附录 A-G 独立（commit 30426e0） |
+| D-02 | `action-items` 与 `action_items` 两个 Tag 同时存在于 API spec（连字符 vs 下划线） | API 文档一致性 | ✅ 已完成：统一为 `action-items`（commit 35ace40） |
+| D-03 | `nullclaw_pending_events` 中多线索格式事件（`thread_updates` 数组）写入 `thread_id` 时只取 `[0].thread_id`，若第一个线索重试先于第二个完成，可能破坏第二个线索的有序性 | 边缘场景 | ✅ 已完成：新增 `batch_id` 字段，多线索拆分为 N 条记录（commit 30426e0）|
+| D-04 | `keyword` 订阅匹配使用 `'simple'` 字典（兼容性优先），中文匹配精度低 | 功能质量 | ✅ 已完成：06_llm_prompt_templates.md 新增 §27 zhparser 升级路径（commit 30426e0） |
+| D-05 | `butler_push_config.schedule` 字段为自定义 cron 覆盖，但 nullclaw 的内置 cron 如何与之协调未明确 | 调度一致性 | ✅ 已完成：08_ai_butler_architecture.md 补充调度优先级说明（commit 35ace40） |
 
 ---
 
@@ -254,7 +254,7 @@
 - 核心设计文档（00-08）：✅ 一致性通过
 - 测试文档（05/07）：✅ 全部已同步（E2E 21 场景 + UT §20-26 共 27 用例）
 - 用户/产品文档（09/11/13）：✅ 全部已跟进 v0.7/v0.8
-- 遗留设计问题（D-01/02/03/04/05）：⚠️ 5 项待处理（D-02/D-05 优先）
+- 遗留设计问题（D-01/02/03/04/05）：✅ 全部已处理完毕（2026-03-05）
 
 ---
 
