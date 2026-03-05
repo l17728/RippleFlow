@@ -1549,7 +1549,32 @@ class ISubscriptionService(Protocol):
         target_id: str,
         payload: dict | None = None,
     ) -> list[str]:
-        """发布订阅事件，通知相关订阅者。"""
+        """
+        发布订阅事件，通知相关订阅者。
+        返回值：被通知到的 user_id 列表（已生成 queued_notifications）。
+
+        事件分发逻辑：
+        1. 直接订阅匹配：subscription_type=target_type，target_id=target_id
+           → 精确匹配订阅者
+        2. 用户订阅匹配：subscription_type='user'，target_id=actor_id
+           → 所有关注了该作者的订阅者
+        3. 类别订阅匹配：subscription_type='category'，target_id=payload.get('category')
+           → 订阅了该内容类别的用户
+        4. 关键词订阅匹配（异步，非阻塞）：
+           → 提交到后台任务队列，由 KeywordMatcher Worker 处理：
+              SELECT user_id, target_id as keyword
+              FROM user_subscriptions
+              WHERE subscription_type='keyword' AND is_active=TRUE;
+              对每个 keyword 做 PostgreSQL 全文匹配：
+              to_tsvector('chinese', payload_text) @@ plainto_tsquery('chinese', keyword)
+              命中则生成 subscription_events(event_type='keyword_matched')
+              再走普通通知分发流程。
+           注：关键词匹配覆盖 user_documents/shared_links/topic_threads，
+              由 payload 中的 searchable_text 字段提供匹配文本。
+
+        filter_criteria 过滤：匹配到订阅者后，再检查 filter_criteria 是否与 payload 相符，
+        不符合的订阅者静默跳过（不生成通知）。
+        """
         ...
 
     async def get_followable_targets(
@@ -1559,9 +1584,20 @@ class ISubscriptionService(Protocol):
         limit: int = 10,
     ) -> list[dict]:
         """
-        搜索可关注的对象，供前端选择器使用。
-        entity_type: 'user' | 'thread' | 'todo' | 'document' | 'shared_link' | 'workflow' 等
-        返回：[{"id": ..., "name": ..., "type": ..., "description": ...}]
+        搜索可关注的对象，供前端订阅选择器使用。
+
+        entity_type 对应的查询逻辑：
+        - 'user'        → ldap_users 表，模糊匹配 display_name/username
+        - 'thread'      → topic_threads 表，模糊匹配 title/summary
+        - 'todo'        → personal_todos 表，visibility ≠ 'private'，模糊匹配 title
+        - 'document'    → user_documents 表，已发布，模糊匹配 title
+        - 'shared_link' → shared_links 表，模糊匹配 title/url
+        - 'workflow'    → workflow_templates 表，模糊匹配 name
+        - 'category'    → 枚举返回9大内置类别（query过滤名称）
+        - 'keyword'     → 返回已有高频关键词（来自 butler_suggestions 采纳记录 + 历史标签），
+                         同时支持用户输入新关键词（query 不匹配任何已有词时，返回 query 本身作为候选）
+
+        返回：[{"id": ..., "name": ..., "type": ..., "description": ..., "subscriber_count": ...}]
         """
         ...
 ```
@@ -3050,8 +3086,58 @@ class IButlerSuggestionService(Protocol):
         suggestion_id: UUID,
         applied: bool,
         applied_value: str | None = None,
+        ai_applied: bool = False,
     ) -> None:
-        """记录用户对建议的采纳情况，供 Routine 分析采纳率。"""
+        """
+        记录用户对建议的采纳情况，供 Routine 分析采纳率。
+
+        调用时机：
+        1. 用户主动确认建议（highlight 模式点击"采纳"）
+           → applied=True, applied_value=建议值
+        2. 用户忽略建议（切换字段/提交时未采纳）
+           → applied=False, applied_value=None
+        3. auto_apply 隐式反馈（实体保存时，业务层自动触发）：
+           → applied=True, applied_value=字段最终值, ai_applied=True
+           业务层伪代码：
+               async def on_entity_saved(entity_type, entity_id, final_fields):
+                   pending = await butler_svc.list_pending_suggestions(
+                       user_id, entity_type, entity_id_or_none=None
+                   )
+                   for s in pending:
+                       field_value = final_fields.get(s.field)
+                       auto = any(item.confidence > 0.9 for item in s.suggestions)
+                       await butler_svc.record_feedback(
+                           s.id, applied=True, applied_value=field_value, ai_applied=auto
+                       )
+                       await butler_svc.link_entity(s.id, entity_id)
+        """
+        ...
+
+    async def link_entity(
+        self,
+        suggestion_id: UUID,
+        entity_id: UUID,
+    ) -> None:
+        """
+        将创建时 entity_id=NULL 的建议记录回填 entity_id。
+        在实体保存成功后由业务层调用，避免孤儿记录。
+        UPDATE butler_suggestions SET entity_id=$entity_id
+        WHERE id=$suggestion_id AND entity_id IS NULL;
+        """
+        ...
+
+    async def list_pending_suggestions(
+        self,
+        user_id: str,
+        entity_type: str,
+        entity_id: UUID | None = None,
+        created_after: datetime | None = None,
+    ) -> list[SuggestionResult]:
+        """
+        查询某用户在特定实体类型下还未关联 entity_id（创建中）的建议记录。
+        用于实体保存时批量回填 entity_id 并自动发送 auto_apply 反馈。
+        默认只返回最近 1 小时内的记录（created_after 控制）。
+        """
         ...
 
     async def get_common_tags(
@@ -3066,7 +3152,12 @@ class IButlerSuggestionService(Protocol):
     async def prefetch_link_metadata(self, url: str) -> dict:
         """
         抓取外部链接 OG 元数据：{title, description, site_name, favicon_url, preview_image}
-        超时（5s）或失败时返回空 dict。
+        超时（5s）或失败时返回空 dict（降级为人工填写）。
+        抓取结果的 fetch_status 由 ISharedLinkService 更新：
+          - 成功 → fetch_status='success', metadata_fetched_at=NOW()
+          - 超时/失败 → fetch_status='failed'
+          失败后用户可在卡片编辑页手动填写标题/描述，
+          也可通过 POST /api/v1/shared-links/{id}/refetch 触发重新抓取。
         """
         ...
 ```

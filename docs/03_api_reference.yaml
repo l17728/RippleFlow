@@ -353,11 +353,23 @@ components:
           type: string
           minLength: 1
           example: Redis 连接超时
+        entity_types:
+          type: array
+          items:
+            type: string
+            enum:
+            - threads
+            - documents
+            - shared_links
+          description: |
+            限定搜索范围，默认搜索所有类型。
+            threads=话题线索, documents=富文本文档, shared_links=外部链接分享
+          default: [threads, documents, shared_links]
         categories:
           type: array
           items:
             type: string
-          description: 限定类别，默认全部
+          description: 限定类别，默认全部（仅对 threads 和 documents 有效）
         date_from:
           type: string
           format: date
@@ -382,12 +394,44 @@ components:
     SearchResult:
       type: object
       properties:
+        total:
+          type: integer
+          description: 各类型结果总数之和
         threads:
-          type: array
-          items:
-            $ref: '#/components/schemas/ThreadSummary'
-        meta:
-          $ref: '#/components/schemas/PaginationMeta'
+          type: object
+          properties:
+            total:
+              type: integer
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/TopicThread'
+          description: 话题线索匹配结果
+        documents:
+          type: object
+          properties:
+            total:
+              type: integer
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/UserDocument'
+          description: 用户文档匹配结果
+        shared_links:
+          type: object
+          properties:
+            total:
+              type: integer
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/SharedLink'
+          description: 外部链接分享匹配结果
+        page:
+          type: integer
+        size:
+          type: integer
+
     QARequest:
       type: object
       required:
@@ -3854,6 +3898,76 @@ paths:
           description: 非管理员
         '404':
           description: 任务不存在
+  /api/v1/subscriptions/followable-targets:
+    get:
+      tags:
+      - subscriptions
+      summary: 搜索可关注对象
+      description: |
+        根据实体类型和关键词搜索可关注的对象，供前端订阅选择器使用。
+        对于 keyword 类型，返回系统内已有的热门关键词；
+        对于 user/thread/document/todo 类型，按名称模糊搜索。
+      security:
+      - cookieAuth: []
+      parameters:
+      - in: query
+        name: entity_type
+        required: true
+        schema:
+          type: string
+          enum:
+          - user
+          - thread
+          - category
+          - todo
+          - document
+          - shared_link
+          - workflow
+          - keyword
+        description: 要搜索的实体类型
+      - in: query
+        name: q
+        required: true
+        schema:
+          type: string
+          minLength: 1
+        description: 搜索关键词
+      - in: query
+        name: limit
+        schema:
+          type: integer
+          default: 10
+          maximum: 50
+      responses:
+        '200':
+          description: 可关注对象列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          description: 对象 ID（keyword 类型时即为关键词文本）
+                        name:
+                          type: string
+                          description: 显示名称
+                        type:
+                          type: string
+                          description: 实体类型
+                        description:
+                          type: string
+                          nullable: true
+                          description: 补充说明（如话题摘要、用户职位）
+                        subscriber_count:
+                          type: integer
+                          description: 当前订阅人数（帮助判断热门程度）
+
   /api/v1/subscriptions:
     get:
       tags:
@@ -3871,6 +3985,12 @@ paths:
           - thread
           - category
           - keyword
+          - todo
+          - resource
+          - event
+          - document
+          - shared_link
+          - workflow
       - in: query
         name: is_active
         schema:
@@ -3911,20 +4031,30 @@ paths:
                   - thread
                   - category
                   - keyword
+                  - todo
+                  - resource
+                  - event
+                  - document
+                  - shared_link
+                  - workflow
                   description: 订阅类型
                 target_id:
                   type: string
-                  description: '被订阅对象 ID：
-
+                  description: |
+                    被订阅对象 ID：
                     - user: ldap_user_id
-
-                    - thread: thread UUID
-
-                    - category: category code
-
-                    - keyword: 关键词文本
-
-                    '
+                    - thread/todo/document/shared_link/workflow: UUID
+                    - category: category code（如 tech_decision）
+                    - keyword: 关键词文本（如 Redis）
+                    - resource/event: 对应实体 UUID
+                filter_criteria:
+                  type: object
+                  description: |
+                    可选过滤条件，让订阅更精细：
+                    {"author": "zhangsan"} 仅收到某人的内容
+                    {"tags": ["redis"]} 仅收到含特定标签的内容
+                    {"category": "tech_decision"} 仅收到特定类别
+                  example: {}
                 notification_types:
                   type: array
                   items:
@@ -7975,6 +8105,40 @@ paths:
   # AI 智能辅助输入（跨切面设计模式）
   # -------------------------------------------------
 
+  /api/v1/shared-links/{link_id}/refetch:
+    post:
+      tags:
+      - shared-links
+      summary: 重新抓取链接 OG 元数据
+      description: |
+        当首次抓取失败（fetch_status=failed）后，用户可手动触发重新抓取。
+        异步执行，立即返回 202；完成后更新 fetch_status 和相关元数据字段。
+      security:
+      - cookieAuth: []
+      parameters:
+      - in: path
+        name: link_id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '202':
+          description: 重新抓取任务已排队
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Refetch task queued
+                  fetch_status:
+                    type: string
+                    example: pending
+        '404':
+          description: 链接不存在
+
   /api/v1/butler/suggest:
     post:
       tags: [butler]
@@ -8061,8 +8225,60 @@ paths:
                 applied_value:
                   type: string
                   description: 最终采纳的值（可能是建议中的，也可能是用户自己输入的）
+                ai_applied:
+                  type: boolean
+                  default: false
+                  description: |
+                    是否为系统 auto_apply 触发的隐式反馈。
+                    TRUE=confidence>0.9 系统自动填入，FALSE=用户主动确认或忽略。
+                    实体保存时由业务层自动调用，不需要用户感知。
       responses:
         '204': { description: 反馈已记录 }
+
+  /api/v1/butler/suggest/link-entity:
+    post:
+      tags:
+      - butler
+      summary: 回填建议记录的 entity_id
+      description: |
+        实体创建成功后，将 entity_id=NULL 的建议记录关联到新实体。
+        通常由业务端在实体保存成功后自动调用，不需要用户感知。
+        同时可触发 auto_apply 建议的隐式反馈（applied=TRUE）。
+      security:
+      - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - entity_type
+              - entity_id
+              properties:
+                entity_type:
+                  type: string
+                  description: 实体类型（与创建建议时一致）
+                entity_id:
+                  type: string
+                  format: uuid
+                  description: 新创建的实体 UUID
+                final_field_values:
+                  type: object
+                  description: |
+                    实体各字段的最终值，用于自动发送 auto_apply 反馈。
+                    {"category": "tech_decision", "tags": ["redis", "performance"]}
+      responses:
+        '200':
+          description: 回填完成
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  linked_count:
+                    type: integer
+                    description: 成功关联的建议记录数
 
   /api/v1/butler/suggest/common-tags:
     get:

@@ -29,8 +29,10 @@ PRAGMA busy_timeout = 5000;
 
 -- incident_status: open, investigating, mitigated, resolved
 
--- notification_type: sensitive_pending, thread_modified, consensus_drift,
+-- notification_type（平台系统）: sensitive_pending, thread_modified, consensus_drift,
 --                   action_item_assigned, reminder
+-- notification_type（订阅触发）: document_published, shared_link_shared, todo_updated,
+--                   plan_milestone_reached, new_thread, user_new_contribution
 
 -- =============================================================
 -- TABLE: chat_rooms
@@ -546,15 +548,45 @@ CREATE TABLE user_subscriptions (
             'todo', 'resource', 'event', 'document', 'shared_link', 'workflow'
         )
     ),
-    target_id       TEXT NOT NULL,
-    filter_criteria TEXT NOT NULL DEFAULT '{}',   -- JSON 字符串
-    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    target_id         TEXT NOT NULL,
+    filter_criteria   TEXT NOT NULL DEFAULT '{}',    -- JSON 字符串
+    notification_types TEXT NOT NULL DEFAULT 'in_app', -- JSON 数组: ["in_app","email","push"]
+    is_active         INTEGER NOT NULL DEFAULT 1,    -- BOOLEAN: 0/1
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
 
     UNIQUE(ldap_user_id, subscription_type, target_id)
 );
 
-CREATE INDEX idx_subscriptions_user ON user_subscriptions(ldap_user_id);
-CREATE INDEX idx_subscriptions_target ON user_subscriptions(target_id);
+CREATE INDEX idx_subscriptions_user ON user_subscriptions(ldap_user_id, is_active);
+CREATE INDEX idx_subscriptions_target ON user_subscriptions(subscription_type, target_id, is_active);
+CREATE INDEX idx_subscriptions_type ON user_subscriptions(subscription_type);
+
+-- =============================================================
+-- TABLE: subscription_events
+-- 订阅事件日志（驱动通知分发）
+-- =============================================================
+
+CREATE TABLE subscription_events (
+    id              TEXT PRIMARY KEY,
+    event_type      TEXT NOT NULL,
+    -- 话题类：thread_updated | thread_new_message | category_new_thread
+    -- 用户类：user_contribution
+    -- 文档类：document_published | document_updated
+    -- 链接类：shared_link_created
+    -- 任务类：todo_updated | todo_completed | plan_milestone_reached
+    -- 关键词：keyword_matched
+    actor_id        TEXT,                    -- 触发事件的用户 ldap_user_id
+    target_type     TEXT NOT NULL,
+    -- 'thread' | 'user' | 'category' | 'todo' | 'resource'
+    -- | 'document' | 'shared_link' | 'workflow'
+    target_id       TEXT NOT NULL,           -- 目标对象 ID
+    payload         TEXT NOT NULL DEFAULT '{}', -- JSON 格式事件详情
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_subscription_events_target ON subscription_events(target_type, target_id, created_at);
+CREATE INDEX idx_subscription_events_type ON subscription_events(event_type, created_at);
 
 -- =============================================================
 -- TABLE: qa_feedback
@@ -936,14 +968,22 @@ CREATE TABLE user_presence (
 -- =============================================================
 
 CREATE TABLE queued_notifications (
-    id           TEXT PRIMARY KEY,
-    user_id      TEXT NOT NULL,
-    event_type   TEXT NOT NULL,
-    payload      TEXT NOT NULL DEFAULT '{}',
-    priority     INTEGER NOT NULL DEFAULT 5,
-    expires_at   TEXT,
-    delivered_at TEXT,
-    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    id                    TEXT PRIMARY KEY,
+    user_id               TEXT NOT NULL,
+    notification_type     TEXT NOT NULL
+        CHECK (notification_type IN (
+            'sensitive_pending', 'thread_modified', 'consensus_drift',
+            'action_item_assigned', 'reminder',
+            'document_published', 'shared_link_shared', 'todo_updated',
+            'plan_milestone_reached', 'new_thread', 'user_new_contribution'
+        )),
+    payload               TEXT NOT NULL DEFAULT '{}',  -- JSON 格式
+    priority              INTEGER NOT NULL DEFAULT 5,
+    subscription_id       TEXT REFERENCES user_subscriptions(id) ON DELETE SET NULL,
+    subscription_event_id TEXT REFERENCES subscription_events(id) ON DELETE SET NULL,
+    expires_at            TEXT,
+    delivered_at          TEXT,
+    created_at            TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX idx_queued_notif_user ON queued_notifications (user_id, priority)

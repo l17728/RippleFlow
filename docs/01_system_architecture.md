@@ -8251,11 +8251,47 @@ GET  /api/v1/internal/watchdog/events   查询重启历史（管理员）
 用户确认/修改/忽略
     |
     v
-客户端异步上报 POST /api/v1/butler/suggest/feedback
-    {suggestion_id, applied, applied_value?}
+反馈上报（三种路径）：
+  A. 用户主动确认（highlight/list 模式点击"采纳"）
+     → 客户端立即调用 POST /api/v1/butler/suggest/feedback
+       {suggestion_id, applied=true, applied_value="...", ai_applied=false}
+
+  B. 用户忽略（离开字段/提交时未确认）
+     → 客户端调用 feedback {applied=false, ai_applied=false}
+
+  C. auto_apply 隐式反馈（实体保存时，业务层自动触发）
+     → 业务层在实体保存成功后批量调用：
+       1. POST /api/v1/butler/suggest/link-entity
+          {entity_type, entity_id=新ID, final_field_values}
+          （同时触发 auto_apply 建议的 applied=true 回写）
+     → applied_value 为字段最终值，ai_applied=true
+     → 若用户保存前手动修改了字段，applied_value 为用户修改后的值
+       （下次建议时系统可感知用户覆盖了 AI 建议，适当降低该场景置信度）
 ```
 
-### 44.3 适用场景
+### 44.3 实体 ID 生命周期（entity_id 孤儿处理）
+
+```
+用户新建实体时（entity 尚未保存）：
+  POST /api/v1/butler/suggest {entity_id=null} → suggestion 记录 entity_id=NULL
+
+用户保存实体后（entity 已获得 ID）：
+  POST /api/v1/butler/suggest/link-entity
+    {entity_type, entity_id=新UUID, final_field_values}
+  → 业务层执行：
+    UPDATE butler_suggestions SET entity_id=$new_id
+    WHERE user_id=$uid AND entity_type=$type AND entity_id IS NULL
+    AND created_at > NOW() - INTERVAL '1 hour';
+  → 同时对每个匹配记录检查是否有 auto_apply（confidence>0.9），
+    自动发送 applied=true 反馈，完成隐式反馈闭环。
+
+清理策略（每日 Routine）：
+  DELETE FROM butler_suggestions
+  WHERE entity_id IS NULL AND created_at < NOW() - INTERVAL '24 hours';
+  → 超过 24 小时仍未关联的孤儿记录定期清理
+```
+
+### 44.4 适用场景
 
 | 实体 | 字段 | 建议来源 |
 |------|------|----------|
@@ -8273,7 +8309,7 @@ GET  /api/v1/internal/watchdog/events   查询重启历史（管理员）
 | workflow | name | 基于触发条件和步骤生成名称 |
 | custom_field | value | 基于同类字段历史值推荐 |
 
-### 44.4 学习闭环
+### 44.5 学习闭环
 
 ```
 butler_suggestions 表积累反馈数据
@@ -8292,7 +8328,7 @@ butler_suggestions 表积累反馈数据
 若建议质量持续低于阈值 -> 生成 PRD 上报给 claw 开发团队
 ```
 
-### 44.5 性能保障
+### 44.6 性能保障
 
 - **防抖**：客户端 1s 防抖，避免每次按键触发
 - **超时降级**：2s 超时直接返回空列表，用户继续手动填写，不影响体验
@@ -8300,7 +8336,7 @@ butler_suggestions 表积累反馈数据
 - **批量限制**：每个用户每分钟最多 30 次建议请求（Rate Limit）
 - **缓存**：相同 context_hash 在 60s 内复用上次结果（不重复 LLM 调用）
 
-### 44.6 隐私边界
+### 44.7 隐私边界
 
 - 建议请求只发送「当前字段内容」和「实体类型」，不发送其他字段
 - 历史建议记录（butler_suggestions）仅用于采纳率分析，不用于跨用户推荐
