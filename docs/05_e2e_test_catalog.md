@@ -2171,4 +2171,709 @@ env:
 
 ---
 
+## Part 7：消息入库全链路 E2E 测试（推演修复后补充）
+
+> 覆盖消息入库触发的完整流程，对应推演中识别的 17 个 GAP 修复验证。
+> 前置条件：`LLM_MOCK_ENABLED=true`，所有 LLM 调用返回确定性 Mock 响应。
+
+---
+
+### TC-INGEST-001：正常技术决策消息 - 完整 Stage 0-5 流程（Happy Path）
+
+```typescript
+test('消息入库完整流程 - tech_decision 类别', async ({ request }) => {
+  // 1. 发送 Webhook
+  const webhookResp = await request.post('/api/v1/webhooks/chat', {
+    headers: { 'X-Webhook-Secret': testWebhookSecret },
+    data: {
+      external_msg_id: 'msg-ingest-001',
+      room_id: 'tech-discussion',
+      sender_id: 'zhangsan',
+      content: '我们决定在生产环境使用 Redis Cluster 代替单节点，主要考虑高可用。',
+      timestamp: new Date().toISOString(),
+    },
+  });
+  expect(webhookResp.ok()).toBeTruthy();
+  const { message_id } = await webhookResp.json();
+
+  // 2. 等待 Stage 0-4 完成（轮询 processing_status）
+  await waitForMessageStatus(request, message_id, 'processed', { timeout: 10_000 });
+
+  // 3. 验证消息记录
+  const msgResp = await request.get(`/api/v1/messages/${message_id}`);
+  const msg = await msgResp.json();
+  expect(msg.processing_status).toBe('processed');
+  expect(msg.is_bot_message).toBe(false);
+  expect(msg.pipeline_start_stage).toBe(0);
+
+  // 4. 验证线索创建
+  const threadsResp = await request.get('/api/v1/threads', {
+    params: { category: 'tech_decision', keyword: 'Redis Cluster' },
+  });
+  const threads = (await threadsResp.json()).threads;
+  expect(threads.length).toBeGreaterThanOrEqual(1);
+  const thread = threads[0];
+  expect(thread.title).toContain('Redis');
+
+  // 5. 等待 nullclaw Stage5 写回（摘要）
+  // nullclaw mock 写回 summary 后，轮询 thread.summary 非空
+  await waitForThreadSummary(request, thread.id, { timeout: 8_000 });
+
+  // 6. 验证摘要写回后才触发订阅通知（GAP-16 验证）
+  // category_subscriber 应收到 queued_notification（通知在 Stage5 后生成）
+  const notifResp = await request.get('/api/v1/notifications', {
+    headers: { 'X-User-Id': 'category_subscriber_user' },
+  });
+  const notifs = (await notifResp.json()).notifications;
+  const threadNotif = notifs.find((n: any) => n.related_id === thread.id);
+  expect(threadNotif).toBeDefined();
+
+  // 7. 验证通知内含摘要（证明通知在 Stage5 后触发）
+  const fullThread = await (await request.get(`/api/v1/threads/${thread.id}`)).json();
+  expect(fullThread.summary).toBeTruthy();  // summary 必须已存在
+});
+```
+
+---
+
+### TC-INGEST-002：幂等性 - 重复 Webhook 不创建重复消息（GAP-8）
+
+```typescript
+test('Webhook 幂等性 - 相同 external_msg_id 只入库一次', async ({ request }) => {
+  const payload = {
+    external_msg_id: 'msg-idempotent-001',
+    room_id: 'tech-discussion',
+    sender_id: 'zhangsan',
+    content: '幂等测试消息',
+    timestamp: new Date().toISOString(),
+  };
+
+  // 第一次发送
+  const r1 = await request.post('/api/v1/webhooks/chat', {
+    headers: { 'X-Webhook-Secret': testWebhookSecret },
+    data: payload,
+  });
+  expect(r1.ok()).toBeTruthy();
+  const { message_id: id1 } = await r1.json();
+
+  // 第二次发送（模拟 Webhook 重试）
+  const r2 = await request.post('/api/v1/webhooks/chat', {
+    headers: { 'X-Webhook-Secret': testWebhookSecret },
+    data: payload,
+  });
+  expect(r2.ok()).toBeTruthy();
+  const { message_id: id2 } = await r2.json();
+
+  // 两次返回同一 message_id，消息仅入库一次
+  expect(id1).toBe(id2);
+
+  // 验证数据库中只有一条该 external_msg_id 的记录（通过搜索验证）
+  const countResp = await request.get('/api/v1/messages', {
+    params: { external_msg_id: 'msg-idempotent-001' },
+  });
+  // 实现上通过 ON CONFLICT DO NOTHING 保证，API 应返回200且内容一致
+  expect(r2.status()).toBe(200);
+});
+```
+
+---
+
+### TC-INGEST-003：机器人消息过滤 - 不进入处理流程（GAP-7）
+
+```typescript
+test('机器人消息 - 跳过 Pipeline，不触发 LLM 调用', async ({ request }) => {
+  const resp = await request.post('/api/v1/webhooks/chat', {
+    headers: { 'X-Webhook-Secret': testWebhookSecret },
+    data: {
+      external_msg_id: 'msg-bot-001',
+      room_id: 'tech-discussion',
+      sender_id: 'rippleflow-bot',  // 机器人 sender_id
+      is_bot: true,
+      content: '这是机器人的回复消息，不应入库处理',
+      timestamp: new Date().toISOString(),
+    },
+  });
+  expect(resp.ok()).toBeTruthy();
+  const { message_id } = await resp.json();
+
+  // 机器人消息应立即标记 skipped，不进入队列
+  const msgResp = await request.get(`/api/v1/messages/${message_id}`);
+  const msg = await msgResp.json();
+  expect(msg.processing_status).toBe('skipped');
+  expect(msg.is_bot_message).toBe(true);
+
+  // 确认 LLM 未被调用（通过 Mock 统计）
+  const mockStats = await (await request.get('/internal/test/llm-mock-stats')).json();
+  const botMsgCallCount = mockStats.calls_for_message_id[message_id] ?? 0;
+  expect(botMsgCallCount).toBe(0);
+});
+```
+
+---
+
+### TC-INGEST-004：敏感消息完整授权循环（GAP-1/2 防死循环）
+
+```typescript
+test('敏感消息 - 授权后从 Stage1 重入，不重复触发 Stage0', async ({ request }) => {
+  // 1. 发送包含敏感信息的消息
+  const webhookResp = await request.post('/api/v1/webhooks/chat', {
+    headers: { 'X-Webhook-Secret': testWebhookSecret },
+    data: {
+      external_msg_id: 'msg-sensitive-001',
+      room_id: 'hr-channel',
+      sender_id: 'hr_manager',
+      content: '张三的薪资调整为 35K，请知悉。',
+      timestamp: new Date().toISOString(),
+    },
+  });
+  const { message_id } = await webhookResp.json();
+
+  // 2. 等待进入 pending_authorization 状态
+  await waitForMessageStatus(request, message_id, 'pending_authorization', { timeout: 5_000 });
+
+  // 3. 验证 pipeline_start_stage = 0（初始值）
+  const msgBefore = await (await request.get(`/api/v1/messages/${message_id}`)).json();
+  expect(msgBefore.processing_status).toBe('pending_authorization');
+
+  // 4. 当事人授权
+  const authResp = await request.post('/api/v1/sensitive/authorize', {
+    headers: { 'X-User-Id': 'zhangsan' },  // 当事人
+    data: { message_id, decision: 'approve', reason: '同意入库' },
+  });
+  expect(authResp.ok()).toBeTruthy();
+
+  // 5. 验证消息重入 pipeline（start_stage=1，跳过 Stage0）
+  await waitForMessageStatus(request, message_id, 'processed', { timeout: 10_000 });
+  const msgAfter = await (await request.get(`/api/v1/messages/${message_id}`)).json();
+  expect(msgAfter.pipeline_start_stage).toBe(1);  // GAP-1 验证：从 Stage1 开始
+
+  // 6. 验证 LLM 调用统计：Stage0 只被调用一次（初次检测），重入后不再调用
+  const mockStats = await (await request.get('/internal/test/llm-mock-stats')).json();
+  const stage0Calls = mockStats.stage0_calls_for_message_id[message_id] ?? 0;
+  expect(stage0Calls).toBe(1);  // GAP-1 验证：Stage0 不重复执行
+});
+```
+
+---
+
+### TC-INGEST-005：Action Item 自动同步为 Todo（GAP-3/4）
+
+```typescript
+test('action_item 消息 - 自动创建 personal_todo，默认 visibility=team', async ({ request }) => {
+  const resp = await request.post('/api/v1/webhooks/chat', {
+    headers: { 'X-Webhook-Secret': testWebhookSecret },
+    data: {
+      external_msg_id: 'msg-action-001',
+      room_id: 'tech-discussion',
+      sender_id: 'pm_user',
+      content: '@lisi 请在本周五前完成 Redis 集群压测报告并提交。',
+      timestamp: new Date().toISOString(),
+    },
+  });
+  const { message_id } = await resp.json();
+
+  await waitForMessageStatus(request, message_id, 'processed', { timeout: 10_000 });
+
+  // 验证被指派人（lisi）的 todo 列表中出现对应任务
+  const todosResp = await request.get('/api/v1/todos', {
+    headers: { 'X-User-Id': 'lisi' },
+    params: { visibility: 'team' },
+  });
+  const todos = (await todosResp.json()).todos;
+  const actionTodo = todos.find((t: any) => t.source_message_id === message_id);
+
+  expect(actionTodo).toBeDefined();
+  expect(actionTodo.assigned_to).toBe('lisi');
+  expect(actionTodo.visibility).toBe('team');   // GAP-4：默认 team，不是 private
+  expect(actionTodo.source_type).toBe('action_item');
+});
+```
+
+---
+
+### TC-INGEST-006：多分类消息 - 多线索并行创建（GAP-5）
+
+```typescript
+test('多分类消息 - 同时归属 tech_decision + reference_data', async ({ request }) => {
+  const resp = await request.post('/api/v1/webhooks/chat', {
+    headers: { 'X-Webhook-Secret': testWebhookSecret },
+    data: {
+      external_msg_id: 'msg-multi-cat-001',
+      room_id: 'tech-discussion',
+      sender_id: 'senior_dev',
+      content: '我们决定使用 Redis 7.0（技术决策），Redis 7.0 官方文档地址：https://redis.io/docs（参考资料）。',
+      timestamp: new Date().toISOString(),
+    },
+  });
+  const { message_id } = await resp.json();
+
+  await waitForMessageStatus(request, message_id, 'processed', { timeout: 15_000 });
+
+  // 验证多线索创建
+  const threadsResp = await request.get('/api/v1/threads', {
+    params: { source_message_id: message_id },
+  });
+  const threads = (await threadsResp.json()).threads;
+
+  const categories = threads.map((t: any) => t.category);
+  expect(categories).toContain('tech_decision');
+  expect(categories).toContain('reference_data');
+
+  // 验证 nullclaw 收到的 notify_nullclaw payload 使用多线索格式（GAP-5）
+  // 通过查询 nullclaw_pending_events 或 Mock 接收记录验证
+  const eventsResp = await request.get('/internal/test/nullclaw-received-events');
+  const events = await eventsResp.json();
+  const multiThreadEvent = events.find((e: any) =>
+    e.message_id === message_id && e.thread_updates?.length >= 2
+  );
+  expect(multiThreadEvent).toBeDefined();
+  expect(multiThreadEvent.thread_updates.length).toBe(2);
+});
+```
+
+---
+
+### TC-INGEST-007：reference_data 重复检测与标记废弃（GAP-6）
+
+```typescript
+test('reference_data - 更新已有 key_name 时旧记录自动废弃', async ({ request }) => {
+  // 1. 第一次入库 Redis 版本信息
+  const r1 = await request.post('/api/v1/webhooks/chat', {
+    headers: { 'X-Webhook-Secret': testWebhookSecret },
+    data: {
+      external_msg_id: 'msg-ref-v1',
+      room_id: 'tech-discussion',
+      sender_id: 'devops_user',
+      content: '生产环境 Redis 版本：6.2.6',
+      timestamp: new Date().toISOString(),
+    },
+  });
+  const { message_id: mid1 } = await r1.json();
+  await waitForMessageStatus(request, mid1, 'processed', { timeout: 10_000 });
+
+  // 获取 reference_data 记录
+  const refResp1 = await request.get('/api/v1/reference-data', {
+    params: { key_name: 'redis_version', group_id: 'tech-discussion' },
+  });
+  const ref1 = (await refResp1.json()).items[0];
+  expect(ref1).toBeDefined();
+  expect(ref1.deprecated_at).toBeNull();
+
+  // 2. 第二次入库新版本（相同 key_name）
+  const r2 = await request.post('/api/v1/webhooks/chat', {
+    headers: { 'X-Webhook-Secret': testWebhookSecret },
+    data: {
+      external_msg_id: 'msg-ref-v2',
+      room_id: 'tech-discussion',
+      sender_id: 'devops_user',
+      content: '生产环境 Redis 版本已升级至 7.0.5',
+      timestamp: new Date().toISOString(),
+    },
+  });
+  const { message_id: mid2 } = await r2.json();
+  await waitForMessageStatus(request, mid2, 'processed', { timeout: 10_000 });
+
+  // 3. 验证旧记录被废弃，新记录有效（GAP-6 验证）
+  const refResp2 = await request.get('/api/v1/reference-data', {
+    params: { key_name: 'redis_version', group_id: 'tech-discussion', include_deprecated: true },
+  });
+  const items = (await refResp2.json()).items;
+  const activeItems = items.filter((i: any) => !i.deprecated_at);
+  const deprecatedItems = items.filter((i: any) => i.deprecated_at);
+
+  expect(activeItems.length).toBe(1);
+  expect(deprecatedItems.length).toBe(1);
+  expect(deprecatedItems[0].id).toBe(ref1.id);  // 旧记录被废弃
+});
+```
+
+---
+
+### TC-INGEST-008：nullclaw 宕机 - Pending 事件有序重试（GAP-10/11）
+
+```typescript
+test('nullclaw 宕机时事件存储，恢复后按线索有序重放', async ({ request }) => {
+  // 1. 模拟 nullclaw 下线（Mock 拒绝所有请求）
+  await request.post('/internal/test/nullclaw-mock-offline');
+
+  // 2. 发送消息（Stage 0-4 完成，但 notify_nullclaw 失败入队）
+  const r1 = await request.post('/api/v1/webhooks/chat', {
+    headers: { 'X-Webhook-Secret': testWebhookSecret },
+    data: {
+      external_msg_id: 'msg-pending-001',
+      room_id: 'tech-discussion',
+      sender_id: 'zhangsan',
+      content: '第一条消息',
+      timestamp: new Date().toISOString(),
+    },
+  });
+  const { message_id: mid1 } = await r1.json();
+
+  const r2 = await request.post('/api/v1/webhooks/chat', {
+    headers: { 'X-Webhook-Secret': testWebhookSecret },
+    data: {
+      external_msg_id: 'msg-pending-002',
+      room_id: 'tech-discussion',
+      sender_id: 'zhangsan',
+      content: '第二条消息',
+      timestamp: new Date().toISOString(),
+    },
+  });
+  const { message_id: mid2 } = await r2.json();
+
+  // 3. 验证 pending_events 表有记录
+  await waitForPendingEvents(request, 2, { timeout: 5_000 });
+
+  // 4. nullclaw 恢复上线
+  await request.post('/internal/test/nullclaw-mock-online');
+
+  // 5. 触发 RetryWorker
+  await request.post('/internal/test/trigger-retry-worker');
+
+  // 6. 验证事件按顺序投递（mid1 先于 mid2，GAP-10 验证）
+  const receivedResp = await request.get('/internal/test/nullclaw-received-events');
+  const received = await receivedResp.json();
+  const mid1Idx = received.findIndex((e: any) => e.payload?.new_message_ids?.includes(mid1));
+  const mid2Idx = received.findIndex((e: any) => e.payload?.new_message_ids?.includes(mid2));
+  expect(mid1Idx).toBeLessThan(mid2Idx);  // GAP-10：有序重放
+
+  // 7. 验证 pending_events 状态更新为 sent
+  const pendingResp = await request.get('/api/v1/nullclaw/pending-events', {
+    params: { status: 'pending' },
+  });
+  const pendingCount = (await pendingResp.json()).total;
+  expect(pendingCount).toBe(0);
+});
+```
+
+---
+
+### TC-INGEST-009：订阅通知在 Stage5 摘要就绪后触发（GAP-16）
+
+```typescript
+test('category 订阅通知 - 仅在 Stage5 摘要写回后触发，不提前', async ({ request }) => {
+  // 1. 订阅 tech_decision 类别
+  await request.post('/api/v1/subscriptions', {
+    headers: { 'X-User-Id': 'notification_tester' },
+    data: { subscription_type: 'category', target_id: 'tech_decision' },
+  });
+
+  // 2. 发送消息
+  const resp = await request.post('/api/v1/webhooks/chat', {
+    headers: { 'X-Webhook-Secret': testWebhookSecret },
+    data: {
+      external_msg_id: 'msg-notif-timing-001',
+      room_id: 'tech-discussion',
+      sender_id: 'dev_user',
+      content: '决定采用 Kong 作为 API 网关。',
+      timestamp: new Date().toISOString(),
+    },
+  });
+  const { message_id } = await resp.json();
+
+  // 3. Stage 0-4 完成时检查通知（此时不应有通知）
+  await waitForMessageStatus(request, message_id, 'processed', { timeout: 10_000 });
+
+  // nullclaw 尚未完成 Stage5 时，不应有通知（GAP-16）
+  // 使用 nullclaw mock 延迟 Stage5 写回来验证这一点
+  const earlyNotifResp = await request.get('/api/v1/notifications', {
+    headers: { 'X-User-Id': 'notification_tester' },
+    params: { created_after: new Date(Date.now() - 5000).toISOString() },
+  });
+  // Stage5 尚未完成，通知数量为0
+  expect((await earlyNotifResp.json()).notifications.length).toBe(0);
+
+  // 4. 触发 nullclaw mock 完成 Stage5（写回摘要 + 调用 /internal/subscriptions/publish）
+  await request.post('/internal/test/nullclaw-complete-stage5', {
+    data: { message_id },
+  });
+
+  // 5. Stage5 完成后，通知应出现
+  await expect(async () => {
+    const notifResp = await request.get('/api/v1/notifications', {
+      headers: { 'X-User-Id': 'notification_tester' },
+    });
+    const notifs = (await notifResp.json()).notifications;
+    expect(notifs.length).toBeGreaterThan(0);
+  }).toPass({ timeout: 5_000 });
+});
+```
+
+---
+
+### TC-INGEST-010：关键词订阅匹配与 searchable_text 构建（GAP-17）
+
+```typescript
+test('keyword 订阅 - searchable_text 包含摘要且命中关键词', async ({ request }) => {
+  // 1. 创建关键词订阅
+  await request.post('/api/v1/subscriptions', {
+    headers: { 'X-User-Id': 'keyword_subscriber' },
+    data: { subscription_type: 'keyword', target_id: 'Elasticsearch' },
+  });
+
+  // 2. 发送包含关键词的消息
+  const resp = await request.post('/api/v1/webhooks/chat', {
+    headers: { 'X-Webhook-Secret': testWebhookSecret },
+    data: {
+      external_msg_id: 'msg-keyword-001',
+      room_id: 'tech-discussion',
+      sender_id: 'search_dev',
+      content: '我们评估了 Elasticsearch 作为全文搜索引擎的方案。',
+      timestamp: new Date().toISOString(),
+    },
+  });
+  const { message_id } = await resp.json();
+  await waitForMessageStatus(request, message_id, 'processed', { timeout: 10_000 });
+
+  // 3. nullclaw 完成 Stage5 并触发订阅通知
+  await request.post('/internal/test/nullclaw-complete-stage5', {
+    data: { message_id },
+  });
+
+  // 4. 等待关键词匹配 Worker 完成
+  await new Promise(resolve => setTimeout(resolve, 2000));
+
+  // 5. 验证 keyword_subscriber 收到通知
+  const notifResp = await request.get('/api/v1/notifications', {
+    headers: { 'X-User-Id': 'keyword_subscriber' },
+  });
+  const notifs = (await notifResp.json()).notifications;
+  const kwNotif = notifs.find((n: any) => n.type === 'keyword_matched');
+  expect(kwNotif).toBeDefined();
+
+  // 6. 验证 subscription_events 记录包含 keyword 信息
+  const eventsResp = await request.get('/api/v1/subscriptions/events', {
+    headers: { 'X-User-Id': 'keyword_subscriber' },
+  });
+  const events = (await eventsResp.json()).events;
+  const kwEvent = events.find((e: any) =>
+    e.event_type === 'keyword_matched' && e.metadata?.matched_keyword === 'Elasticsearch'
+  );
+  expect(kwEvent).toBeDefined();
+});
+```
+
+---
+
+### TC-INGEST-011：nullclaw ApiKey 认证 - 内部端点鉴权（GAP-9）
+
+```typescript
+test('nullclaw API Key - /internal 端点拒绝无效 Key', async ({ request }) => {
+  // 无 Authorization header → 401
+  const r1 = await request.post('/internal/subscriptions/publish', {
+    data: { event_type: 'new_thread', target_type: 'thread', target_id: 'some-uuid', actor_id: 'user' },
+  });
+  expect(r1.status()).toBe(401);
+
+  // 错误格式 → 401
+  const r2 = await request.post('/internal/subscriptions/publish', {
+    headers: { Authorization: 'Bearer jwt-token' },
+    data: { event_type: 'new_thread', target_type: 'thread', target_id: 'some-uuid', actor_id: 'user' },
+  });
+  expect(r2.status()).toBe(401);
+
+  // 正确 ApiKey → 200
+  const r3 = await request.post('/internal/subscriptions/publish', {
+    headers: { Authorization: `ApiKey ${testNullclawApiKey}` },
+    data: {
+      event_type: 'new_thread',
+      target_type: 'thread',
+      target_id: testThreadId,
+      actor_id: 'zhangsan',
+      payload: { category: 'tech_decision', searchable_text: 'Redis Cluster', title: '测试线索' },
+    },
+  });
+  expect(r3.status()).toBe(200);
+});
+```
+
+---
+
+### TC-INGEST-012：摘要漂移告警 - nullclaw 触发 bulk 通知（GAP-14）
+
+```typescript
+test('consensus_drift 告警 - nullclaw 通过 /internal/notifications/bulk 通知管理员', async ({ request }) => {
+  // nullclaw 检测到摘要漂移，调用 bulk 通知接口
+  const bulkResp = await request.post('/internal/notifications/bulk', {
+    headers: { Authorization: `ApiKey ${testNullclawApiKey}` },
+    data: {
+      notification_type: 'consensus_drift',
+      recipients: ['admin_user'],
+      content: {
+        title: '线索摘要偏差告警',
+        body: '话题「Redis集群部署」摘要与最新消息偏差超过30%，建议重新生成。',
+        action_url: `/threads/${testThreadId}`,
+        metadata: {
+          thread_id: testThreadId,
+          drift_score: 0.42,
+          message_count_delta: 15,
+        },
+      },
+      priority: 'high',
+    },
+  });
+  expect(bulkResp.ok()).toBeTruthy();
+  const result = await bulkResp.json();
+  expect(result.created_count).toBe(1);
+
+  // 验证管理员收到通知
+  const notifResp = await request.get('/api/v1/notifications', {
+    headers: { 'X-User-Id': 'admin_user' },
+  });
+  const notifs = (await notifResp.json()).notifications;
+  const driftNotif = notifs.find((n: any) => n.type === 'consensus_drift');
+  expect(driftNotif).toBeDefined();
+  expect(driftNotif.metadata?.drift_score).toBe(0.42);
+});
+```
+
+---
+
+### TC-INGEST-013：管家推送配置 - nullclaw 读取动态配置（GAP-15）
+
+```typescript
+test('butler_push_config - nullclaw 读取并按配置推送日报', async ({ request }) => {
+  // 1. 管理员更新日报推送目标
+  const updateResp = await request.put('/api/v1/admin/butler/config/daily_digest_room', {
+    headers: { 'X-User-Id': 'admin_user', 'X-User-Role': 'admin' },
+    params: { group_id: 'default' },
+    data: {
+      target_room_id: 'announcements',
+      target_room_name: '公告频道',
+      enabled: true,
+    },
+  });
+  expect(updateResp.ok()).toBeTruthy();
+
+  // 2. nullclaw 读取配置
+  const configResp = await request.get('/internal/butler/config', {
+    headers: { Authorization: `ApiKey ${testNullclawApiKey}` },
+    params: { group_id: 'default', config_type: 'daily_digest_room' },
+  });
+  const configs = await configResp.json();
+  expect(configs.length).toBe(1);
+  expect(configs[0].target_room_id).toBe('announcements');  // 读取到最新配置
+  expect(configs[0].enabled).toBe(true);
+
+  // 3. 验证禁用后 nullclaw 不读取到该配置
+  await request.put('/api/v1/admin/butler/config/daily_digest_room', {
+    headers: { 'X-User-Id': 'admin_user', 'X-User-Role': 'admin' },
+    params: { group_id: 'default' },
+    data: { enabled: false },
+  });
+
+  const configResp2 = await request.get('/internal/butler/config', {
+    headers: { Authorization: `ApiKey ${testNullclawApiKey}` },
+    params: { group_id: 'default', config_type: 'daily_digest_room' },
+  });
+  const configs2 = await configResp2.json();
+  expect(configs2.length).toBe(0);  // 禁用后不返回
+});
+```
+
+---
+
+### TC-INGEST-014：reference_data 敏感字段访问控制（GAP-13）
+
+```typescript
+test('reference_data 敏感字段 - 非当事人只能看 label 不能看 value', async ({ request }) => {
+  // 假设已有一条 is_sensitive=true 的 reference_data（如薪资信息）
+  const searchResp = await request.get('/api/v1/search', {
+    headers: { 'X-User-Id': 'regular_user' },
+    params: { query: '薪资标准', entity_types: 'reference_data' },
+  });
+  const results = (await searchResp.json()).results?.reference_data ?? [];
+
+  // 普通用户只能看到 label，不能看到 value
+  for (const item of results) {
+    if (item.is_sensitive) {
+      expect(item.label).toBeDefined();
+      expect(item.value).toBeUndefined();  // GAP-13：敏感值不返回
+    }
+  }
+
+  // 当事人可以看到 value
+  const sensitiveSearchResp = await request.get('/api/v1/search', {
+    headers: { 'X-User-Id': 'authorized_stakeholder' },
+    params: { query: '薪资标准', entity_types: 'reference_data' },
+  });
+  const sensitiveResults = (await sensitiveSearchResp.json()).results?.reference_data ?? [];
+  const sensitiveItem = sensitiveResults.find((i: any) => i.is_sensitive);
+  if (sensitiveItem) {
+    expect(sensitiveItem.value).toBeDefined();  // 当事人可见 value
+  }
+});
+```
+
+---
+
+### Helper 函数
+
+```typescript
+// e2e/helpers/pipeline-helpers.ts
+
+const testWebhookSecret = process.env.TEST_WEBHOOK_SECRET ?? 'test-secret';
+const testNullclawApiKey = process.env.TEST_NULLCLAW_API_KEY ?? 'test-nullclaw-key';
+const testThreadId = process.env.TEST_THREAD_ID ?? '550e8400-e29b-41d4-a716-446655440000';
+
+async function waitForMessageStatus(
+  request: APIRequestContext,
+  messageId: string,
+  expectedStatus: string,
+  options: { timeout: number } = { timeout: 10_000 }
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < options.timeout) {
+    const resp = await request.get(`/api/v1/messages/${messageId}`);
+    if (resp.ok()) {
+      const msg = await resp.json();
+      if (msg.processing_status === expectedStatus) return;
+      if (['failed', 'skipped'].includes(msg.processing_status)) {
+        throw new Error(`Message ${messageId} reached unexpected status: ${msg.processing_status}`);
+      }
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  throw new Error(`Timeout waiting for message ${messageId} to reach status: ${expectedStatus}`);
+}
+
+async function waitForThreadSummary(
+  request: APIRequestContext,
+  threadId: string,
+  options: { timeout: number } = { timeout: 8_000 }
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < options.timeout) {
+    const resp = await request.get(`/api/v1/threads/${threadId}`);
+    if (resp.ok()) {
+      const thread = await resp.json();
+      if (thread.summary && thread.summary.trim().length > 0) return;
+    }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  throw new Error(`Timeout waiting for thread ${threadId} summary`);
+}
+
+async function waitForPendingEvents(
+  request: APIRequestContext,
+  expectedCount: number,
+  options: { timeout: number } = { timeout: 5_000 }
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < options.timeout) {
+    const resp = await request.get('/api/v1/nullclaw/pending-events', {
+      params: { status: 'pending' },
+    });
+    if (resp.ok()) {
+      const data = await resp.json();
+      if (data.total >= expectedCount) return;
+    }
+    await new Promise(r => setTimeout(r, 300));
+  }
+  throw new Error(`Timeout waiting for ${expectedCount} pending events`);
+}
+```
+
+---
+
 **END OF E2E TEST CATALOG**

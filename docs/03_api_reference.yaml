@@ -91,6 +91,15 @@ components:
       type: apiKey
       in: header
       name: X-Bot-Token
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: |
+        nullclaw 系统级 API Key 认证。
+        格式：Authorization: ApiKey <key>
+        Key 的 SHA-256 hash 存储在 user_whitelist.api_key_hash（is_system=true 的记录）。
+        仅供内部服务（nullclaw）调用 /internal/* 端点使用。
       description: 聊天机器人专用认证 Token
   schemas:
     ErrorResponse:
@@ -2472,7 +2481,49 @@ components:
         view_count: { type: integer }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
-    ButlerSuggestion:
+    ButlerPushConfig:
+    type: object
+    properties:
+      id:
+        type: string
+        format: uuid
+      group_id:
+        type: string
+        example: default
+      config_type:
+        type: string
+        enum:
+        - daily_digest_room
+        - weekly_report_room
+        - alert_room
+        - qa_room
+        - onboarding_room
+      target_room_id:
+        type: string
+        example: general
+      target_room_name:
+        type: string
+        example: 综合频道
+      enabled:
+        type: boolean
+        example: true
+      schedule:
+        type: string
+        nullable: true
+        example: '0 9 * * 1-5'
+      custom_prompt:
+        type: string
+        nullable: true
+      created_by:
+        type: string
+        example: admin_user
+      created_at:
+        type: string
+        format: date-time
+      updated_at:
+        type: string
+        format: date-time
+  ButlerSuggestion:
       type: object
       properties:
         value: { type: string }
@@ -5798,7 +5849,8 @@ paths:
         - `user.feedback`: 用户提交反馈
 
         '
-      security: []
+      security:
+      - apiKeyAuth: []
       requestBody:
         required: true
         content:
@@ -5852,6 +5904,351 @@ paths:
           description: 无效的事件类型或载荷
         '503':
           description: nullclaw 服务不可用
+  /internal/subscriptions/publish:
+    post:
+      tags:
+      - internal
+      summary: nullclaw 触发订阅事件发布（Stage5 完成后）
+      description: |
+        nullclaw 完成 Stage5（线索摘要写回）后，通过此接口触发
+        ISubscriptionService.publish_event()，向订阅者发送通知。
+
+        **GAP-16 修复**：publish_event() 不在 Stage4 完成时立即调用，
+        必须等 nullclaw Stage5 摘要写回完成后才触发，确保用户点击通知时摘要已就绪。
+
+        **触发时机**：
+        - is_new_thread=True：创建新线索且摘要写入后
+        - is_new_thread=False：现有线索有新消息且摘要更新后
+
+        **认证**：仅 nullclaw（ApiKey）可调用
+      security:
+      - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - event_type
+              - target_type
+              - target_id
+              properties:
+                event_type:
+                  type: string
+                  enum:
+                  - new_thread
+                  - thread_updated
+                  - document_published
+                  - link_shared
+                  example: new_thread
+                actor_id:
+                  type: string
+                  description: 触发事件的用户 ID（消息发送者）
+                  example: zhangsan
+                target_type:
+                  type: string
+                  enum:
+                  - thread
+                  - document
+                  - shared_link
+                  example: thread
+                target_id:
+                  type: string
+                  format: uuid
+                  description: 目标对象 ID（thread_id / document_id / link_id）
+                  example: 550e8400-e29b-41d4-a716-446655440000
+                payload:
+                  type: object
+                  description: |
+                    事件附加数据，供关键词匹配和通知内容使用。
+                    必须包含 searchable_text 字段供关键词订阅匹配。
+                  properties:
+                    category:
+                      type: string
+                      description: 内容类别（topic_thread 适用）
+                      example: tech_decision
+                    searchable_text:
+                      type: string
+                      description: |
+                        供关键词订阅匹配的文本。
+                        thread: "{title} {summary} {latest_message_content}"
+                        document: "{title} {summary} {content[:500]}"
+                        shared_link: "{title} {description} {url}"
+                    title:
+                      type: string
+                      description: 通知标题（用于 queued_notifications 内容）
+                    summary:
+                      type: string
+                      description: 摘要（Stage5 写回后的线索摘要）
+      responses:
+        '200':
+          description: 订阅事件发布成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  notified_count:
+                    type: integer
+                    description: 生成通知的订阅者数量
+                    example: 12
+                  keyword_match_queued:
+                    type: boolean
+                    description: 关键词异步匹配是否已入队
+                    example: true
+        '401':
+          description: ApiKey 无效或缺失
+        '422':
+          description: 请求体格式错误
+  /internal/notifications/bulk:
+    post:
+      tags:
+      - internal
+      summary: nullclaw 批量触发系统级通知（摘要漂移告警等）
+      description: |
+        nullclaw 通过此接口批量创建系统级 queued_notifications，
+        用于摘要漂移告警、Routine 执行结果推送、管理员告警等场景。
+
+        **GAP-14 修复**：consensus_drift（摘要漂移）检测由 nullclaw 在 Stage5 执行后判断，
+        漂移超出阈值时通过此接口批量通知线索参与者和管理员，
+        无需 RippleFlow 平台自行维护漂移检测逻辑。
+
+        **适用场景**：
+        - consensus_drift：线索摘要与原始记录偏差超出阈值
+        - routine_summary：nullclaw 日/周 Routine 执行结果推送
+        - butler_alert：管家系统告警（nullclaw 不可用等）
+
+        **认证**：仅 nullclaw（ApiKey）可调用
+      security:
+      - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - notification_type
+              - recipients
+              - content
+              properties:
+                notification_type:
+                  type: string
+                  enum:
+                  - consensus_drift
+                  - routine_summary
+                  - butler_alert
+                  - system_announcement
+                  example: consensus_drift
+                recipients:
+                  type: array
+                  description: 接收通知的 user_id 列表（空数组=通知所有管理员）
+                  items:
+                    type: string
+                  example:
+                  - zhangsan
+                  - lisi
+                content:
+                  type: object
+                  required:
+                  - title
+                  - body
+                  properties:
+                    title:
+                      type: string
+                      example: '线索摘要偏差告警'
+                    body:
+                      type: string
+                      example: '话题「Redis集群部署」摘要与最新消息偏差超过30%，建议重新生成。'
+                    action_url:
+                      type: string
+                      description: 通知点击跳转 URL（可选）
+                      example: /threads/550e8400-e29b-41d4-a716-446655440000
+                    metadata:
+                      type: object
+                      description: 附加元数据（漂移分数、线索ID等）
+                      example:
+                        thread_id: 550e8400-e29b-41d4-a716-446655440000
+                        drift_score: 0.42
+                        message_count_delta: 15
+                priority:
+                  type: string
+                  enum:
+                  - low
+                  - normal
+                  - high
+                  - urgent
+                  default: normal
+                  description: 通知优先级（urgent 触发即时推送，跳过批量合并）
+      responses:
+        '200':
+          description: 通知创建成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  created_count:
+                    type: integer
+                    description: 成功创建的通知数量
+                    example: 5
+                  skipped_count:
+                    type: integer
+                    description: 因用户通知偏好被跳过的数量
+                    example: 1
+        '401':
+          description: ApiKey 无效或缺失
+        '422':
+          description: 请求体格式错误
+  /internal/butler/config:
+    get:
+      tags:
+      - internal
+      summary: nullclaw 读取管家推送配置
+      description: |
+        nullclaw 在 Routine 执行前调用此接口，获取当前群组的推送目标房间和调度配置。
+
+        **GAP-15 修复**：nullclaw 不再硬编码推送目标，通过此接口动态读取配置，
+        支持管理员在运行时更新推送房间无需重启 nullclaw。
+
+        **认证**：仅 nullclaw（ApiKey）可调用
+      security:
+      - apiKeyAuth: []
+      parameters:
+      - name: group_id
+        in: query
+        schema:
+          type: string
+          default: default
+        description: 群组 ID，默认查询 'default' 配置
+      - name: config_type
+        in: query
+        schema:
+          type: string
+          enum:
+          - daily_digest_room
+          - weekly_report_room
+          - alert_room
+          - qa_room
+          - onboarding_room
+        description: 过滤特定类型，不传则返回所有
+      responses:
+        '200':
+          description: 推送配置列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    config_type:
+                      type: string
+                      example: daily_digest_room
+                    target_room_id:
+                      type: string
+                      example: general
+                    target_room_name:
+                      type: string
+                      example: 综合频道
+                    enabled:
+                      type: boolean
+                      example: true
+                    schedule:
+                      type: string
+                      nullable: true
+                      example: '0 9 * * 1-5'
+                    custom_prompt:
+                      type: string
+                      nullable: true
+        '401':
+          description: ApiKey 无效
+  /api/v1/admin/butler/config:
+    get:
+      tags:
+      - admin
+      summary: 管理员查看管家推送配置
+      security:
+      - cookieAuth: []
+      parameters:
+      - name: group_id
+        in: query
+        schema:
+          type: string
+          default: default
+      responses:
+        '200':
+          description: 配置列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ButlerPushConfig'
+        '403':
+          description: 仅管理员可访问
+  /api/v1/admin/butler/config/{config_type}:
+    put:
+      tags:
+      - admin
+      summary: 管理员更新管家推送配置
+      security:
+      - cookieAuth: []
+      parameters:
+      - name: config_type
+        in: path
+        required: true
+        schema:
+          type: string
+          enum:
+          - daily_digest_room
+          - weekly_report_room
+          - alert_room
+          - qa_room
+          - onboarding_room
+      - name: group_id
+        in: query
+        schema:
+          type: string
+          default: default
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_room_id:
+                  type: string
+                  description: 新的推送目标房间 ID
+                  example: tech-announcements
+                target_room_name:
+                  type: string
+                  example: 技术公告
+                enabled:
+                  type: boolean
+                  default: true
+                schedule:
+                  type: string
+                  nullable: true
+                  description: 自定义 cron 表达式（null=使用默认）
+                  example: '0 8 * * 1-5'
+                custom_prompt:
+                  type: string
+                  nullable: true
+                  description: 自定义 Prompt 片段（null=使用默认模板）
+      responses:
+        '200':
+          description: 配置更新成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ButlerPushConfig'
+        '403':
+          description: 仅管理员可访问
+        '404':
+          description: 配置项不存在
   /api/v1/logs/client:
     post:
       tags:

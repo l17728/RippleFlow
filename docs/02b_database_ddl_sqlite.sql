@@ -79,7 +79,9 @@ CREATE TABLE user_whitelist (
     ldap_user_id TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
     email        TEXT,
-    role         TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('member', 'admin')),
+    role         TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('member', 'admin', 'system')),
+    is_system    INTEGER NOT NULL DEFAULT 0,  -- BOOLEAN: 系统级账号（nullclaw 等）
+    api_key_hash TEXT,                        -- SHA-256 哈希 API Key（仅系统级账号使用）
     added_by     TEXT,
     added_at     TEXT NOT NULL DEFAULT (datetime('now')),
     is_active    INTEGER NOT NULL DEFAULT 1,
@@ -884,7 +886,10 @@ CREATE TABLE nullclaw_pending_events (
     id              TEXT PRIMARY KEY,          -- 应用层 uuid.uuid4() 生成
     event_type      TEXT NOT NULL
                     CHECK (event_type IN ('message_processed', 'thread_updated', 'sensitive_resolved')),
+    thread_id       TEXT,                      -- GAP-11: 顶级 thread_id，支持按线索分组顺序重放
     payload         TEXT NOT NULL DEFAULT '{}', -- JSON 格式
+    -- 单线索：{"thread_id":"...", "category":"...", "new_message_ids":["..."], "is_new_thread":1}
+    -- 多线索：{"message_id":"...", "thread_updates":[{"thread_id":"...", "category":"...", "is_new_thread":1}]}
     status          TEXT NOT NULL DEFAULT 'pending'
                     CHECK (status IN ('pending', 'delivered', 'failed', 'expired')),
     retry_count     INTEGER NOT NULL DEFAULT 0,
@@ -897,6 +902,8 @@ CREATE TABLE nullclaw_pending_events (
 CREATE INDEX idx_pending_events_retry ON nullclaw_pending_events (next_retry_at)
     WHERE status = 'pending';
 CREATE INDEX idx_pending_events_status ON nullclaw_pending_events (status, created_at DESC);
+CREATE INDEX idx_pending_events_thread ON nullclaw_pending_events (thread_id, created_at)
+    WHERE status = 'pending';
 
 -- =============================================================
 -- 消息处理死信队列（P1-2）
@@ -1247,3 +1254,28 @@ CREATE TABLE IF NOT EXISTS butler_suggestions (
 
 CREATE INDEX IF NOT EXISTS idx_butler_sugg_entity ON butler_suggestions (entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_butler_sugg_user ON butler_suggestions (user_id);
+
+-- 管家推送配置表（GAP-15 修复）
+CREATE TABLE IF NOT EXISTS butler_push_config (
+    id              TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6)))),
+    group_id        TEXT NOT NULL,
+    config_type     TEXT NOT NULL CHECK (config_type IN ('daily_digest_room','weekly_report_room','alert_room','qa_room','onboarding_room')),
+    target_room_id  TEXT NOT NULL,
+    target_room_name TEXT,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    schedule        TEXT,
+    custom_prompt   TEXT,
+    created_by      TEXT NOT NULL,
+    updated_by      TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (group_id, config_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_butler_push_config_group ON butler_push_config (group_id, enabled);
+
+INSERT OR IGNORE INTO butler_push_config (group_id, config_type, target_room_id, target_room_name, created_by)
+VALUES
+  ('default', 'daily_digest_room',  'general',   '综合频道', 'system'),
+  ('default', 'weekly_report_room', 'general',   '综合频道', 'system'),
+  ('default', 'alert_room',         'ops-alert', '运维告警', 'system');

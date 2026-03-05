@@ -177,7 +177,17 @@ class IMessageService(Protocol):
         """
         接收来自 Webhook 的消息，存入 DB，入 Celery 处理队列。
         返回内部 message_id。
-        重复消息（external_msg_id 相同）幂等处理，直接返回已有 ID。
+
+        执行顺序：
+        1. 查询 chat_users WHERE user_external_id=dto.sender_external_id：
+           - GAP-7 修复：若 is_bot=True，写入 messages（processing_status='skipped',
+             is_bot_message=True），立即返回，不入 Celery 队列，不经过任何 Stage。
+             机器人消息保留完整历史记录，但不进入知识库处理。
+        2. 查询 messages WHERE external_msg_id=dto.external_msg_id：
+           - GAP-8 修复：使用 INSERT ... ON CONFLICT (external_msg_id) DO NOTHING RETURNING id
+             解决并发双推竞争条件，幂等处理，返回已有 ID。
+        3. 写入 messages（processing_status='pending'）
+        4. 将 message_id 入 Celery 处理队列（IProcessingPipelineService.run()）
         """
         ...
 
@@ -234,12 +244,40 @@ from ..domain.types import (
 
 class IProcessingPipelineService(Protocol):
 
-    async def run(self, message_id: UUID) -> str:
+    async def run(self, message_id: UUID, start_stage: int = 0) -> str:
         """
         执行 Stage 0–4 共 5 阶段流水线（Stage 5 摘要更新已移交 nullclaw）。
-        完成后向 nullclaw 发送事件通知（HTTP POST）。
+        完成后向 nullclaw 发送事件通知（HTTP POST，支持多线索 payload，见 GAP-5 修复）。
         返回最终状态字符串：
           'skipped_noise' | 'sensitive_pending' | 'classified' | 'failed'
+
+        参数：
+          start_stage: 从哪个阶段开始执行（默认 0=Stage0）。
+                       GAP-1 修复：敏感授权通过后重入时传入 start_stage=1，
+                       跳过 Stage0 避免重复触发敏感检测死循环。
+
+        执行逻辑（多分类场景，GAP-3 修复）：
+          Stage 0 (if start_stage<=0): 敏感检测
+          Stage 1 (if start_stage<=1): 噪声过滤
+            - GAP-2 修复：若 messages.pipeline_start_stage=1（敏感授权重入），
+              Stage1 的 Prompt 追加上下文："本消息已由当事人授权入库，请重点
+              判断知识价值，而非因'HR/人事类信息'理由过滤"。
+          Stage 2: 分类（返回所有 confidence>=0.6 的类别）
+          Stage 3+4: 对每个分类分别执行（for category in results）：
+            - stage3_match_thread(message_id, category)
+            - stage4_extract_structured(message_id, thread_id, category)
+            - 若 category='action_item'：自动调用 IPersonalTodoService.sync_from_action_item()
+              （GAP-3 修复：Pipeline 显式依赖 PersonalTodoService）
+          完成后：
+            - 统一调用 ISubscriptionService.publish_event()（GAP-16 修复：见下方说明）
+            - 统一调用 notify_nullclaw()（多线索格式，GAP-5 修复）
+
+        GAP-16 修复（keyword通知时序）：
+          publish_event() 不在 Stage4 完成后立即调用。
+          正确顺序：notify_nullclaw() → nullclaw 完成 Stage5（摘要写回）→
+          由 nullclaw 通过 POST /internal/subscriptions/publish 触发 publish_event()。
+          这确保用户点击通知时，线索摘要已就绪。
+          对于 is_new_thread=True 的情况，摘要生成完毕才应推送 new_thread 通知。
         """
         ...
 
@@ -499,6 +537,33 @@ class ISearchService(Protocol):
         仅在指定 category 内检索，受时间窗口限制。
         """
         ...
+
+    async def find_reference(
+        self,
+        query: str,
+        resource_type: str | None = None,
+        environment: str | None = None,
+        service_name: str | None = None,
+        include_deprecated: bool = False,
+        limit: int = 10,
+    ) -> list[dict]:
+        """
+        GAP-12 修复：查询 reference_data_items，供机器人意图路由（reference intent）使用。
+
+        查询逻辑：
+        - 全文搜索 reference_data_items 的 label + value（PostgreSQL 全文检索）
+        - 可选过滤：resource_type（'ip'|'url'|'endpoint'|...）、environment、service_name
+        - include_deprecated=False（默认）：只返回 is_deprecated=False 的记录
+        - is_sensitive=True 的记录：只返回 label，不返回 value（GAP-13 修复）
+          （在 body 字段说明"此数据敏感，请到 Dashboard 查看完整内容"）
+
+        返回：[{
+            id, resource_type, label, value_or_redacted,
+            environment, service_name, is_sensitive,
+            is_deprecated, deprecated_at, thread_id
+        }]
+        """
+        ...
 ```
 
 ---
@@ -570,7 +635,21 @@ class ISensitiveService(Protocol):
         记录当事人决策，更新 decisions JSONB。
         重新计算 overall_status。
         已 reject 的无法更改（抛 ConflictError）。
-        若 overall_status 变为 authorized：消息重入处理队列。
+
+        若 overall_status 变为 'authorized'（GAP-1/2 修复）：
+          1. UPDATE messages SET pipeline_start_stage=1 WHERE id=message_id
+             （pipeline_start_stage=1 表示跳过 Stage0，直接从 Stage1 开始）
+          2. Stage1（噪声过滤）的 LLM Prompt 中注入授权上下文（GAP-2 修复）：
+             Prompt 前缀追加："本消息已由所有当事人授权入库处理，
+             请基于知识价值判断，不要因其涉及人事/薪资/HR信息而过滤。"
+             实现方式：将 is_authorized=True 传入 Stage1 的 Prompt 构建函数，
+             由 ILLMService.check_noise() 接受可选的 context_hint 参数。
+          3. messages.processing_status = 'pending'
+          4. 入 Celery 队列：IProcessingPipelineService.run(message_id, start_stage=1)
+
+        若 overall_status 变为 'rejected'：
+          messages.processing_status = 'sensitive_rejected'，不入队。
+
         返回 {overall_status, pending_count}。
         """
         ...
@@ -652,6 +731,26 @@ class IAuthService(Protocol):
 
     async def get_current_user(self, token: str) -> dict:
         """组合 verify_jwt + check_whitelist，返回当前用户信息"""
+        ...
+
+    async def verify_api_key(self, authorization_header: str) -> dict:
+        """
+        验证系统级 API Key（供内部 /internal/* 端点使用）。GAP-9 修复。
+
+        参数：authorization_header 为 HTTP Header 原始值，格式：
+          "ApiKey <plaintext_key>"
+
+        验证逻辑：
+          1. 解析 header，提取 plaintext_key
+          2. 计算 SHA-256(plaintext_key)
+          3. 在 user_whitelist 中查询：
+             WHERE api_key_hash = sha256_hex AND is_system = TRUE AND is_active = TRUE
+          4. 命中 → 返回 {"user_id": ..., "role": "system", "display_name": "nullclaw"}
+          5. 未命中 → 抛 AuthenticationError("Invalid API key")
+
+        注：API Key 仅在部署时生成一次，存储其哈希值（不存明文）。
+            plaintext_key 通过安全配置（如 .env 或 k8s secret）注入 nullclaw 环境变量。
+        """
         ...
 ```
 
@@ -1340,13 +1439,39 @@ class IAIButlerService(Protocol):
         RippleFlow 平台在业务操作完成后，通过此方法推送事件到 nullclaw。
         返回推送是否成功（True=直接投递成功，False=已进入待处理队列）。
 
-        支持的事件类型：
-        - message_processed: Stage 0-4 完成，新消息入库（含 thread_id, category）
-        - thread_updated: 话题线索摘要/状态更新
-        - sensitive_resolved: 敏感授权全部完成
+        支持的事件类型及 Payload 格式：
+        - message_processed（单线索消息，Stage 0-4 完成）：
+            {
+              "event_type": "message_processed",
+              "thread_id": "<UUID>",
+              "category": "<category>",
+              "new_message_ids": ["<UUID>"],
+              "is_new_thread": true | false
+            }
+        - message_processed（多线索消息，GAP-5 修复）：
+            {
+              "event_type": "message_processed",
+              "message_id": "<UUID>",
+              "thread_updates": [
+                {"thread_id": "<UUID>", "category": "<cat>", "is_new_thread": true},
+                {"thread_id": "<UUID>", "category": "<cat>", "is_new_thread": false}
+              ]
+            }
+          当消息归属多个 category（各自生成 topic_thread），使用 thread_updates 数组格式。
+          thread_id 字段（单线索格式的顶层字段）写入 nullclaw_pending_events.thread_id，
+          多线索格式写入 thread_updates[0].thread_id（主线索，用于重试有序性）。
+
+        - thread_updated：
+            {"event_type": "thread_updated", "thread_id": "<UUID>", "update_type": "summary" | "status"}
+
+        - sensitive_resolved：
+            {"event_type": "sensitive_resolved", "message_id": "<UUID>", "authorized": true}
 
         **降级行为（P0-2）**：
-        推送失败时（连接超时 / 非 2xx），事件写入 nullclaw_pending_events 表，
+        推送失败时（连接超时 / 非 2xx），事件写入 nullclaw_pending_events 表：
+          - single-thread 格式：thread_id = payload["thread_id"]
+          - multi-thread 格式：thread_id = payload["thread_updates"][0]["thread_id"]
+          - 其他事件：thread_id = NULL
         后台 RetryWorker 按指数退避重试（最多 5 次，24 小时内）。
         不抛出异常——nullclaw 不可用不影响平台核心流程。
 
@@ -1372,6 +1497,16 @@ class IAIButlerService(Protocol):
         retry_count=3 → 30min 后
         retry_count=4 → 2h 后
         retry_count≥5 → status → 'expired'，告警管理员
+
+        **有序重试保证（GAP-10 修复）**：
+        同一 thread_id 的 pending 事件必须按 created_at ASC 顺序逐一投递，
+        前一条未成功前不投递后续同 thread_id 的事件（利用 idx_pending_events_thread 索引）。
+        实现示例：
+          SELECT * FROM nullclaw_pending_events
+          WHERE status='pending' AND next_retry_at <= NOW()
+          ORDER BY thread_id NULLS LAST, created_at ASC;
+          -- 按 thread_id 分组，每个 thread_id 只取 min(created_at) 那条处理
+          -- thread_id IS NULL 的事件（如 sensitive_resolved）不受此限制，并行重试。
         """
         ...
 ```
@@ -1572,6 +1707,23 @@ class ISubscriptionService(Protocol):
            注：关键词匹配覆盖 user_documents/shared_links/topic_threads，
               由 payload 中的 searchable_text 字段提供匹配文本。
 
+        **searchable_text 构建规范（GAP-17 修复）**：
+        各调用方在传入 payload 时须包含 searchable_text，构建规则如下：
+        - topic_thread：
+            searchable_text = f"{thread.title} {thread.summary} {message.content}"
+            （summary 可能为 None，跳过空字段）
+        - user_document：
+            searchable_text = f"{doc.title} {doc.summary or ''} {doc.content[:500]}"
+            （content 截取前 500 字防止过长）
+        - shared_link：
+            searchable_text = f"{link.title or ''} {link.description or ''} {link.url}"
+        - todo/action_item：
+            searchable_text = f"{todo.title} {todo.description or ''}"
+        关键词匹配使用 PostgreSQL：
+            to_tsvector('simple', searchable_text) @@ plainto_tsquery('simple', keyword)
+        注：使用 'simple' 字典（非 'chinese'），以兼容无中文插件的标准 PostgreSQL 部署。
+            中文支持需安装 zhparser 扩展后改用 'chinese' 字典。
+
         filter_criteria 过滤：匹配到订阅者后，再检查 filter_criteria 是否与 payload 相符，
         不符合的订阅者静默跳过（不生成通知）。
         """
@@ -1766,10 +1918,33 @@ class IPersonalTodoService(Protocol):
     async def sync_from_action_item(
         self,
         thread_id: str,
+        default_visibility: str = 'team',
     ) -> list[PersonalTodo]:
         """
         从知识库中的 action_item 同步到个人待办。
-        当群聊中的 action_item 被识别后，自动为责任人创建待办。
+        当群聊中的 action_item 被识别后，由 IProcessingPipelineService.run() 在 Stage 4
+        完成后自动调用（GAP-3 修复：Pipeline 显式调用点）。
+
+        执行逻辑：
+        1. 读取 topic_threads.structured_data（category='action_item'）
+           提取 assignee（可能多人）、due_date、priority、task 描述
+        2. 对每个 assignee 调用 create_todo()：
+           - user_id = assignee（ldap_user_id）
+           - title = structured_data.task
+           - due_date = structured_data.due_date（若未识别，置 None）
+           - priority = structured_data.priority（默认 'medium'）
+           - visibility = default_visibility（GAP-4 修复：默认 'team' 而非 'private'）
+             从群聊识别的任务应对发布者和团队可见；可由 IProcessingPipelineService
+             根据群组配置覆盖（如群组设定为 'team' 或 'followers'）
+           - source_type = 'action_item'
+           - source_id = thread_id
+        3. create_todo() 内部：
+           - 写入 personal_todos
+           - 调用 INotificationService.send(type='action_item_assigned')，通知被指派人
+           - 若 visibility != 'private'，调用 ISubscriptionService.publish_event()
+             但注意 GAP-16 修复：此 publish_event() 不触发 keyword 通知，
+             keyword 通知由 nullclaw Stage5 完成后通过 /internal/subscriptions/publish 触发
+        4. 返回已创建的 PersonalTodo 列表
         """
         ...
 ```
@@ -1780,11 +1955,13 @@ class IPersonalTodoService(Protocol):
 
 ```
 ProcessingPipelineService
-    ├── MessageService
-    ├── LLMService
-    ├── ThreadService
-    ├── SensitiveService
-    └── NotificationService
+    ├── MessageService         (Stage 0-4 读写消息状态，幂等入库)
+    ├── LLMService             (各 Stage 的 LLM 调用)
+    ├── ThreadService          (Stage 3 创建/匹配线索)
+    ├── SensitiveService       (Stage 0 敏感检测 + 授权管理)
+    ├── NotificationService    (Stage 0 敏感通知)
+    ├── PersonalTodoService    (GAP-3修复：Stage 4 action_item → 自动创建待办)
+    └── NullclawPublisherService (Stage 4 完成后 notify_nullclaw，多线索 payload)
 
 BotAdapterService
     ├── LLMService
@@ -2046,7 +2223,76 @@ class IExceptionNotificationService(Protocol):
 
 ---
 
-## 19. 配置项定义（新增）
+## 19. ButlerPushConfigService（管家推送配置服务 - GAP-15 新增）
+
+```python
+# rippleflow/services/interfaces/butler_push_config_service.py
+from typing import Protocol
+from uuid import UUID
+
+
+class IButlerPushConfigService(Protocol):
+    """
+    管家推送配置服务（GAP-15 修复）。
+
+    nullclaw 在 Routine 执行前通过此服务读取推送目标配置，
+    管理员通过 Admin API 更新配置，无需重启服务。
+
+    解决的问题：nullclaw 原来硬编码推送目标房间 ID，
+    部署环境变化时需要修改代码并重新部署 nullclaw。
+    通过此服务，nullclaw 动态读取配置，管理员可在运行时调整。
+    """
+
+    async def get_config(
+        self,
+        group_id: str = "default",
+        config_type: str | None = None,
+    ) -> list[dict]:
+        """
+        获取推送配置列表（nullclaw Routine 开始前调用）。
+
+        返回格式：
+        [
+          {
+            "config_type": "daily_digest_room",
+            "target_room_id": "general",
+            "target_room_name": "综合频道",
+            "enabled": True,
+            "schedule": "0 9 * * 1-5",
+            "custom_prompt": None
+          },
+          ...
+        ]
+        仅返回 enabled=True 的配置项。
+        """
+        ...
+
+    async def upsert_config(
+        self,
+        group_id: str,
+        config_type: str,
+        target_room_id: str,
+        target_room_name: str | None = None,
+        enabled: bool = True,
+        schedule: str | None = None,
+        custom_prompt: str | None = None,
+        updated_by: str = "admin",
+    ) -> dict:
+        """
+        创建或更新推送配置（管理员调用）。
+        使用 INSERT ... ON CONFLICT (group_id, config_type) DO UPDATE 语义。
+        返回更新后的配置项。
+        """
+        ...
+
+    async def disable_config(self, group_id: str, config_type: str) -> None:
+        """禁用某类推送（临时关闭日报等）"""
+        ...
+```
+
+---
+
+## 20. 配置项定义（新增）
 
 ```python
 class LogConfig(TypedDict):

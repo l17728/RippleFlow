@@ -123,7 +123,18 @@ CREATE TABLE user_whitelist (
     ldap_user_id VARCHAR(255) PRIMARY KEY,
     display_name VARCHAR(255)       NOT NULL,
     email        VARCHAR(255),
-    role         VARCHAR(50)        NOT NULL DEFAULT 'member', -- 'member' | 'admin'
+    role         VARCHAR(50)        NOT NULL DEFAULT 'member',
+    -- 'member' | 'admin' | 'system'
+    -- system 角色：nullclaw 等系统服务账号，使用 API Key 认证而非 LDAP/SSO
+    is_system    BOOLEAN            NOT NULL DEFAULT false,
+    -- TRUE=系统级账号（如 ldap_user_id='system/nullclaw'），通过 api_key_hash 认证
+    api_key_hash VARCHAR(64),
+    -- GAP-9 修复：系统级账号使用 SHA-256 哈希 API Key（非 JWT）认证
+    -- nullclaw 在 HTTP Header 中携带：Authorization: ApiKey <raw_key>
+    -- 平台验证：SHA-256(raw_key) == api_key_hash
+    -- 预置数据（在系统初始化时写入）：
+    -- INSERT INTO user_whitelist(ldap_user_id, display_name, role, is_system, api_key_hash)
+    -- VALUES ('system/nullclaw', 'nullclaw AI Butler', 'system', true, <SHA256(NULLCLAW_API_KEY)>)
     added_by     VARCHAR(255),                                 -- 操作者 ldap_user_id
     added_at     TIMESTAMPTZ        NOT NULL DEFAULT NOW(),
     is_active    BOOLEAN            NOT NULL DEFAULT true,
@@ -131,6 +142,7 @@ CREATE TABLE user_whitelist (
 );
 
 CREATE INDEX idx_whitelist_active ON user_whitelist(is_active) WHERE is_active = true;
+CREATE INDEX idx_whitelist_system ON user_whitelist(is_system) WHERE is_system = true;
 
 -- =============================================================
 -- TABLE: category_definitions
@@ -241,6 +253,13 @@ CREATE TABLE messages (
     is_noise             BOOLEAN,
     noise_reason         VARCHAR(500),
     classification_raw   JSONB,              -- LLM 原始输出
+
+    -- 流水线控制（GAP-1 修复：敏感授权通过后重入流水线的起始 Stage）
+    pipeline_start_stage SMALLINT NOT NULL DEFAULT 0,
+    -- 0=从 Stage0 开始（正常入库），1=从 Stage1 开始（敏感授权通过后跳过 Stage0）
+    -- 防止授权通过后重入时再次触发敏感检测死循环
+    is_bot_message       BOOLEAN NOT NULL DEFAULT false,
+    -- TRUE=机器人发送的消息：写入 messages 表但 processing_status='skipped'，不入处理队列
 
     -- 历史数据标记
     is_imported          BOOLEAN             NOT NULL DEFAULT false,
@@ -2139,7 +2158,15 @@ CREATE TABLE nullclaw_pending_events (
     id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     event_type      VARCHAR(50) NOT NULL
                     CHECK (event_type IN ('message_processed', 'thread_updated', 'sensitive_resolved')),
+    -- GAP-11 修复：新增 thread_id 顶级字段，支持 RetryWorker 按线索分组、按时序重放
+    -- 单线索事件：payload.thread_id 的快捷访问
+    -- 多线索事件（多分类消息）：填写第一个线索 ID（其余在 payload.thread_updates[] 中）
+    thread_id       UUID,                        -- 关联线索 ID（可为空，如 sensitive_resolved 无线索）
     payload         JSONB NOT NULL DEFAULT '{}',
+    -- GAP-5 修复：payload 结构支持多线索（多分类消息）：
+    -- 单线索：{"thread_id":"...", "category":"...", "new_message_ids":["..."], "is_new_thread":true}
+    -- 多线索：{"message_id":"...", "thread_updates":[{"thread_id":"...", "category":"...", "is_new_thread":bool}, ...]}
+    -- RetryWorker 检测 payload 中是否有 thread_updates 数组来区分单/多线索
     status          VARCHAR(20) NOT NULL DEFAULT 'pending'
                     CHECK (status IN ('pending', 'delivered', 'failed', 'expired')),
     retry_count     INTEGER NOT NULL DEFAULT 0,
@@ -2149,11 +2176,17 @@ CREATE TABLE nullclaw_pending_events (
     delivered_at    TIMESTAMPTZ
 );
 
+-- GAP-10/11 修复索引：支持 RetryWorker 按线索分组顺序重放
 CREATE INDEX idx_pending_events_retry ON nullclaw_pending_events (next_retry_at)
     WHERE status = 'pending';
 CREATE INDEX idx_pending_events_status ON nullclaw_pending_events (status, created_at DESC);
+CREATE INDEX idx_pending_events_thread ON nullclaw_pending_events (thread_id, created_at ASC)
+    WHERE status = 'pending' AND thread_id IS NOT NULL;
+-- 用途：RetryWorker 重放时，同一线索的事件按 created_at 升序处理，保证摘要更新顺序
 
 COMMENT ON TABLE nullclaw_pending_events IS 'nullclaw 事件推送待处理队列：推送失败时暂存，后台重试';
+COMMENT ON COLUMN nullclaw_pending_events.thread_id IS
+    'GAP-11修复：顶级thread_id字段，RetryWorker按线索分组后按时序重放，保证摘要更新顺序正确';
 
 -- =============================================================
 -- 消息处理死信队列（P1-2）
@@ -2222,6 +2255,49 @@ COMMENT ON COLUMN sensitive_authorizations.sensitivity_level IS
     'L1轻微（任一授权+脱敏入库）/ L2中等（>50%授权）/ L3高度（全员授权）';
 COMMENT ON COLUMN sensitive_authorizations.auth_threshold IS
     '授权通过阈值：0.0=任一, 0.5=多数, 1.0=全员';
+
+-- GAP-1 修复：敏感授权通过后重入流水线时跳过 Stage 0，防止死循环
+-- ISensitiveService.submit_decision() 检测到 overall_status→'authorized' 时：
+--   UPDATE messages SET pipeline_start_stage=1, processing_status='pending' WHERE id=message_id;
+--   再将消息重新入 Celery 队列（ProcessingPipeline 读取 pipeline_start_stage 决定从哪个 Stage 开始）
+-- 相关索引（敏感授权后重新入队，需要快速找到 authorized 的记录）
+CREATE INDEX idx_sensitive_authorized ON sensitive_authorizations (message_id)
+    WHERE overall_status = 'authorized';
+
+-- GAP-6 修复：reference_data_items 同类型旧记录自动 deprecated 的 Procedure
+-- 调用时机：Stage 4 写入新 reference_data_item 时，检测同 thread_id + service_name + environment 的旧记录
+CREATE OR REPLACE FUNCTION deprecate_old_reference_data()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- 当新记录插入 reference_data_items 时，将同线索+服务+环境的旧记录标记为废弃
+    -- 条件：同一 thread_id（同一话题线索） + service_name + environment 且 id != NEW.id
+    IF NEW.service_name IS NOT NULL THEN
+        UPDATE reference_data_items
+        SET is_deprecated = TRUE,
+            deprecated_at = NOW(),
+            deprecated_by  = NEW.id  -- 被哪条新记录取代
+        WHERE thread_id    = NEW.thread_id
+          AND service_name = NEW.service_name
+          AND environment  = NEW.environment
+          AND resource_type = NEW.resource_type
+          AND id            != NEW.id
+          AND is_deprecated  = FALSE;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 检查 reference_data_items 是否有 deprecated_at 和 deprecated_by 字段，如无则添加
+ALTER TABLE reference_data_items
+    ADD COLUMN IF NOT EXISTS deprecated_at  TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS deprecated_by  UUID REFERENCES reference_data_items(id) ON DELETE SET NULL;
+
+CREATE TRIGGER trg_deprecate_reference_data
+    AFTER INSERT ON reference_data_items
+    FOR EACH ROW EXECUTE FUNCTION deprecate_old_reference_data();
+
+COMMENT ON TRIGGER trg_deprecate_reference_data ON reference_data_items IS
+    'GAP-6修复：写入新 reference_data 时自动将同线索+服务+环境的旧记录标记为 is_deprecated=TRUE';
 
 
 -- =============================================================
@@ -2616,3 +2692,54 @@ COMMENT ON COLUMN butler_suggestions.context_hash IS '输入内容 hash，相同
 COMMENT ON COLUMN butler_suggestions.suggestions IS '[{value, confidence, reason}]，最多5条';
 COMMENT ON COLUMN butler_suggestions.ai_applied IS 'TRUE=系统 auto_apply，FALSE=用户主动确认或忽略';
 COMMENT ON COLUMN butler_suggestions.entity_id IS 'NULL 表示实体尚未创建，保存实体后应回填';
+
+-- ─────────────────────────────────────────────────
+-- 管家推送配置表（GAP-15 修复）
+-- nullclaw 在执行 Routine（日报/周报/告警）时，需要知道
+-- 将摘要推送到哪个群聊房间。此表由管理员维护，nullclaw 通过
+-- GET /internal/butler/config 在 Routine 开始前读取配置。
+-- ─────────────────────────────────────────────────
+CREATE TABLE butler_push_config (
+    id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+
+    -- 配置键（唯一标识，按 group_id + config_type 组合）
+    group_id        VARCHAR(255) NOT NULL,   -- 所属群组/工作区
+    config_type     VARCHAR(50)  NOT NULL,   -- 配置类型（见下方枚举）
+    -- config_type 枚举：
+    --   'daily_digest_room'   → 日报推送目标房间
+    --   'weekly_report_room'  → 周报推送目标房间
+    --   'alert_room'          → 告警推送目标房间（consensus_drift / 系统告警）
+    --   'qa_room'             → 管家问答默认响应房间
+    --   'onboarding_room'     → 新成员入职介绍推送房间
+
+    -- 推送目标
+    target_room_id  VARCHAR(255) NOT NULL,   -- 目标房间 ID（聊天工具内的 room_id）
+    target_room_name VARCHAR(255),           -- 房间名称（展示用，冗余）
+
+    -- 推送内容定制
+    enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+    schedule        VARCHAR(100),            -- cron 表达式（覆盖默认调度，可选）
+    custom_prompt   TEXT,                    -- 自定义 Prompt 片段（可选，空=使用默认模板）
+
+    -- 元数据
+    created_by      VARCHAR(255) NOT NULL,   -- 管理员 user_id
+    updated_by      VARCHAR(255),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    UNIQUE (group_id, config_type)           -- 每个群组每种类型只有一个有效配置
+);
+
+CREATE INDEX idx_butler_push_config_group ON butler_push_config (group_id, enabled);
+
+COMMENT ON TABLE butler_push_config IS '管家推送配置：Routine 执行前查询推送目标房间和调度计划';
+COMMENT ON COLUMN butler_push_config.config_type IS '配置类型：daily_digest_room/weekly_report_room/alert_room/qa_room/onboarding_room';
+COMMENT ON COLUMN butler_push_config.custom_prompt IS '自定义 Prompt 片段，nullclaw 合并到对应技能模板中';
+
+-- 默认配置种子数据（实际部署时由管理员通过 API 更新目标房间）
+INSERT INTO butler_push_config (group_id, config_type, target_room_id, target_room_name, created_by)
+VALUES
+  ('default', 'daily_digest_room',  'general',  '综合频道', 'system'),
+  ('default', 'weekly_report_room', 'general',  '综合频道', 'system'),
+  ('default', 'alert_room',         'ops-alert','运维告警', 'system');
+
