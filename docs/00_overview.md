@@ -315,6 +315,10 @@ butler_experience_memory:
 | 强制归档/删除 | ❌ | ❌ | ✅ |
 | 管理员介入敏感授权 | ❌ | ❌ | ✅ |
 | 配置 AI 管家任务 | ❌ | ❌ | ✅ |
+| 发布富文本文档 | ✅ | ✅ | ✅ |
+| 分享外部链接卡片 | ✅ | ✅ | ✅ |
+| 订阅关注（人/线索/类别/关键词等） | ✅ | ✅ | ✅ |
+| 配置管家推送目标房间 | ❌ | ❌ | ✅ |
 
 ---
 
@@ -355,26 +359,37 @@ butler_experience_memory:
 ┌─────────────────────┐  ┌──────────────────┐  ┌──────────────────────┐
 │  Service Layer      │  │  缓存层          │  │  LLM API             │
 │                     │  │                  │  │                      │
-│  MessageService     │  │  - 任务队列      │  │  (公司内部部署)       │
-│  ThreadService      │  │  - 会话 Token     │  │                      │
-│  SearchService      │  │  - 搜索缓存       │  │                      │
-│  SensitiveService   │  │  - 管家经验库     │  │                      │
-│  AuthService        │  └──────────────────┘  └──────────────────────┘
-│  NotificationService│
-│  FeedbackService    │  ← 新增：问答反馈
-│  BotAdapterService  │
-│  AIButlerService    │  ← 新增：AI 管家
-│  ChatToolService    │
-│  AdminService       │
-└──────────┬──────────┘
+│  MessageService          │  │  - 任务队列      │  │  (公司内部部署)       │
+│  ThreadService           │  │  - 会话 Token     │  │                      │
+│  SearchService           │  │  - 搜索缓存       │  │                      │
+│  SensitiveService        │  │  - 管家经验库     │  │                      │
+│  AuthService             │  └──────────────────┘  └──────────────────────┘
+│  NotificationService     │
+│  FeedbackService         │  ← 问答反馈
+│  BotAdapterService       │
+│  AIButlerService         │  ← AI 管家
+│  ChatToolService         │
+│  AdminService            │
+│  SubscriptionService     │  ← 订阅关注（10种类型）
+│  UserDocumentService     │  ← 富文本文档发布
+│  SharedLinkService       │  ← 外部链接卡片
+│  ButlerSuggestionService │  ← AI 智能辅助输入
+│  ButlerPushConfigService │  ← 管家推送配置
+│  NullclawPublisherService│  ← nullclaw 事件推送（多线索/有序重试）
+└──────────┬───────────────┘
            │
            ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  PostgreSQL                                                          │
-│  messages / topic_threads / sensitive_authorizations                │
-│  thread_modifications / reference_data_items                       │
-│  user_whitelist / category_definitions / notifications              │
-│  qa_feedback / butler_tasks / butler_experience  ← 新增             │
+│  messages（+pipeline_start_stage/is_bot_message）                   │
+│  topic_threads / sensitive_authorizations                           │
+│  thread_modifications / reference_data_items（+deprecated_at）      │
+│  user_whitelist（+is_system/api_key_hash）                          │
+│  category_definitions / notifications / qa_feedback                 │
+│  butler_tasks / butler_experience / user_subscriptions              │
+│  subscription_events / personal_todos / user_documents              │
+│  shared_links / butler_suggestions / butler_push_config             │
+│  nullclaw_pending_events（+thread_id）                              │
 └─────────────────────────────────────────────────────────────────────┘
            │
            ▼
@@ -407,3 +422,4 @@ butler_experience_memory:
 | 0.5 | 2026-03-01 | 新增 AI 管家角色、问答反馈机制、每周快报、待办提醒 |
 | 0.6 | 2026-03-05 | 分阶段实施路线、Watchdog 架构、插件化扩展机制、设计答记者问 |
 | 0.7 | 2026-03-05 | 订阅类型扩展（10种）、内容发布（文档+链接卡片）、AI 智能辅助输入（§44） |
+| 0.8 | 2026-03-05 | 消息入库全链路推演修复（17项）：管道防死循环、多线索 Payload、有序重试、Stage5 通知时序、ApiKey 认证、管家推送配置、reference_data 废弃机制、14条 E2E 用例 |
