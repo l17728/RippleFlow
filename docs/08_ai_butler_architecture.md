@@ -1006,6 +1006,35 @@ nullclaw 提供自主控制机制，定义管家的自主行为边界：
 - `personal_todos`: 个人待办
 - `todo_participants`: 任务参与人
 - `user_subscriptions`: 用户订阅
+- `butler_push_config`: 推送目标配置（v0.8 新增）
+
+### 调度优先级说明（v0.8）
+
+`butler_push_config` 允许管理员为每个群组动态配置推送目标房间和时间表，
+nullclaw 执行 Routine 时遵循以下优先级：
+
+```
+优先级（高 → 低）：
+
+1. butler_push_config.schedule（数据库配置 cron）
+   ↳ 若 enabled=TRUE 且 schedule 非空，以此为准
+
+2. nullclaw 内置默认 cron（代码硬编码）
+   ↳ 仅当 butler_push_config 中无对应 config_type 记录，
+     或 enabled=FALSE 时生效
+
+示例：
+  数据库配置 daily_digest_room + schedule="0 9 * * *"
+  → nullclaw 在 09:00 推送日报到该房间，忽略内置 07:00 默认值
+```
+
+**实际调用链**：
+```
+nullclaw Routine（cron 触发）
+  → GET /internal/butler/config?group_id=xxx&config_type=daily_digest_room
+  → 取 target_room_id + schedule（若 enabled=FALSE 则跳过该 group）
+  → 执行推送
+```
 
 ---
 
@@ -1016,6 +1045,8 @@ nullclaw 提供自主控制机制，定义管家的自主行为边界：
 - `/api/v1/butler/*`: 管家管理接口
 - `/api/v1/todos/*`: 待办管理接口
 - `/api/v1/subscriptions/*`: 订阅管理接口
+- `/internal/butler/config`: nullclaw 读取推送配置（v0.8 新增）
+- `/api/v1/admin/butler/config/*`: 管理员配置推送目标（v0.8 新增）
 
 ---
 

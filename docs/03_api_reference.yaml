@@ -2953,7 +2953,7 @@ paths:
   /api/v1/action-items/{thread_id}/status:
     put:
       tags:
-      - action_items
+      - action-items
       summary: 更新任务状态
       description: '更新 action_item 类型线索的任务状态。
 

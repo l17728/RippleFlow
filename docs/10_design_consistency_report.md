@@ -25,13 +25,13 @@
 | 04 | `04_service_interfaces.md` | ✅ 已同步 | 26 个 Protocol，含 v0.8 新增 verify_api_key/ButlerPushConfigService |
 | 05 | `05_e2e_test_catalog.md` | ✅ 已同步 | 7 个 Part，21 个测试场景，含 v0.8 Part 7（14 个 E2E 用例） |
 | 06 | `06_llm_prompt_templates.md` | ✅ 已同步 | 25 个 Prompt 模板（§25 字段建议 Prompt v0.7 新增） |
-| 07 | `07_unit_test_catalog.md` | ⚠️ 待补充 | 未覆盖 v0.7/v0.8 新增 Protocol 的单元测试 |
+| 07 | `07_unit_test_catalog.md` | ✅ 已同步 | §20-26 新增 27 个 UT（v0.7/v0.8 新增 Protocol 全覆盖） |
 | 08 | `08_ai_butler_architecture.md` | ✅ 已同步 | v2.0 架构，Stage 5 归属 nullclaw 已确认 |
-| 09 | `09_user_manual.md` | ⚠️ 待补充 | 未覆盖内容发布（文档/链接卡片）使用说明 |
+| 09 | `09_user_manual.md` | ✅ 已同步 | §12 订阅管理、§13 rf CLI 命令速查（v1.3）已补充 |
 | 10 | `10_design_consistency_report.md` | - | 本报告 |
-| 11 | `11_expert_review_report.md` | ⚠️ 参考用 | 基于 v0.6，结论仍有参考价值，未更新 |
+| 11 | `11_expert_review_report.md` | ✅ 已更新 | §十三 v0.7/v0.8 补充审查已追加（2026-03-05） |
 | 12 | `12_design_qa.md` | ✅ 有效 | 设计信条与决策记录，v0.8 不影响 |
-| 13 | `13_implementation_phases.md` | ⚠️ 待更新 | 新增表归属（user_documents/shared_links/butler_push_config）尚未写入 |
+| 13 | `13_implementation_phases.md` | ✅ 已同步 | butler_push_config → Phase 2 归属已写入 |
 | PRD | `群聊知识沉淀与FAQ智能演进系统_PRD.md` | ✅ 有效 | v1.2，独立 FAQ 子系统 PRD |
 
 ---
@@ -200,16 +200,15 @@
 
 ## 五、遗留项与待完善清单
 
-### 5.1 文档补充（下一轮更新）
+### 5.1 文档补充（已全部完成）
 
-| 文档 | 待补充内容 | 优先级 |
-|------|-----------|--------|
-| `07_unit_test_catalog.md` | v0.7 新增 Protocol 的 UT：`IUserDocumentService`、`ISharedLinkService`、`IButlerSuggestionService`、`ISubscriptionService`（扩展部分） | 中 |
-| `07_unit_test_catalog.md` | v0.8 新增 Protocol 的 UT：`IButlerPushConfigService`、`IAuthService.verify_api_key()`、`ISearchService.find_reference()`、`INullclawPublisherService`（多线索/有序重试） | 中 |
-| `09_user_manual.md` | 内容发布功能使用说明：用户文档编辑与发布、链接卡片新增与管理、AI 辅助输入三级建议交互 | 中 |
-| `13_implementation_phases.md` | v0.7 新增表（`user_documents`/`shared_links`/`butler_suggestions`）和 v0.8 新增表（`butler_push_config`）的 Phase 归属 | 低 |
-| `06_llm_prompt_templates.md` | §26 敏感消息重入时 Stage1 授权上下文注入 Prompt（GAP-2 对应） | 低 |
-| `11_expert_review_report.md` | 基于 v0.8 更新专家评审，重点评估消息处理 Pipeline 复杂度与 nullclaw 解耦完整性 | 低 |
+| 文档 | 补充内容 | 状态 |
+|------|---------|------|
+| `07_unit_test_catalog.md` | §20-26：v0.7/v0.8 新增 Protocol 的 UT（27 个用例） | ✅ 已完成 |
+| `09_user_manual.md` | §12 订阅管理、§13 rf CLI 命令速查 | ✅ 已完成 |
+| `13_implementation_phases.md` | user_documents/shared_links/butler_suggestions/butler_push_config Phase 归属 | ✅ 已完成 |
+| `06_llm_prompt_templates.md` | §26 SENSITIVE_AUTH_CONTEXT_TEMPLATE（GAP-2 对应） | ✅ 已完成 |
+| `11_expert_review_report.md` | §十三 v0.7/v0.8 补充审查（评分/建议落地/新风险） | ✅ 已完成 |
 
 ### 5.2 设计层面遗留问题
 
@@ -253,8 +252,9 @@
 
 **文档体系现状**：
 - 核心设计文档（00-08）：✅ 一致性通过
-- 测试文档（05/07）：✅ E2E 已补充，07 单元测试有待续
-- 用户/产品文档（09/11/13）：⚠️ 部分未跟进 v0.7/v0.8
+- 测试文档（05/07）：✅ 全部已同步（E2E 21 场景 + UT §20-26 共 27 用例）
+- 用户/产品文档（09/11/13）：✅ 全部已跟进 v0.7/v0.8
+- 遗留设计问题（D-01/02/03/04/05）：⚠️ 5 项待处理（D-02/D-05 优先）
 
 ---
 
