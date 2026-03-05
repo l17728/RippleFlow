@@ -1,10 +1,10 @@
 # RippleFlow 分阶段实施路线
 
-> **背景**：RippleFlow 系统设计完整，按完整规模（32+表、121 API、20个 Protocol）
+> **背景**：RippleFlow 系统设计完整，按完整规模（75 张表、138 个 API 端点、26 个 Protocol）
 > 分阶段实施以控制交付风险，确保每个阶段都能独立运行、产生价值。
 >
 > **团队配置**：200+ 用户，7-8 名工程师维护
-> **更新时间**：2026-03-05
+> **更新时间**：2026-03-05（v0.8 同步）
 
 ---
 
@@ -103,6 +103,7 @@ Phase 0 → Phase 1 → Phase 2 → Phase 3
 | **内容发布 - 富文本文档** | user_documents | /api/v1/documents/* |
 | **内容发布 - 外部链接卡片** | shared_links | /api/v1/shared-links/* |
 | **AI 智能辅助输入全系统集成** | — | 前端逐步接入 §44 设计模式 |
+| **管家推送配置**（v0.8） | butler_push_config | /internal/butler/config, /api/v1/admin/butler/config/* |
 
 **工程重点**：
 - §24 工作流学习 Prompt 调优
@@ -171,7 +172,7 @@ Phase 3（全功能，可拆分独立交付）
 | todos | 1 | 任务跟踪 |
 | sensitive_authorizations | 1 | 敏感信息合规 |
 | notifications, user_presence, queued_notifications | 1 | 推送基础设施 |
-| nullclaw_pending_events, watchdog_events | 1 | 可靠性基础 |
+| nullclaw_pending_events（含 thread_id 有序重试字段）, watchdog_events | 1 | 可靠性基础（v0.8：thread_id 保证同线索事件有序重放） |
 | faq_quality_alerts | 1 | FAQ 质量闭环 |
 | user_subscriptions（扩展类型） | 1 | 订阅类型枚举扩展（新增6种） |
 | butler_suggestions | 1 | AI 智能辅助输入基础设施，全系统复用 |
@@ -182,6 +183,7 @@ Phase 3（全功能，可拆分独立交付）
 | butler_proposals（PRD扩展字段） | 2 | PRD上报 |
 | user_documents | 2 | 内容发布 - 系统内富文本文档 |
 | shared_links | 2 | 内容发布 - 外部链接分享卡片 |
+| butler_push_config | 2 | 管家推送目标配置（Routine 日报/周报/告警推送房间动态配置） |
 | extension_registry, extension_invocation_logs | 3 | 硬扩展生态 |
 | failed_messages | 3 | DLQ |
 | archive_status（字段） | 3 | 数据归档 |

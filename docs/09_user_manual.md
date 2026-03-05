@@ -2102,6 +2102,163 @@ RippleFlow 支持两种内容发布形式，让知识不仅来自群聊，也可
 
 ---
 
+## §12 关注与订阅管理
+
+RippleFlow 支持关注多种对象，让你精准掌控信息流——不重要的不打扰，重要的第一时间知道。
+
+### 12.1 可关注的对象类型
+
+| 类型 | 说明 | 典型用途 |
+|------|------|----------|
+| **用户**（user） | 关注某位团队成员 | 小王发布了新文档，我第一时间收到通知 |
+| **话题线索**（thread） | 关注某个具体话题 | "Redis 集群部署"话题有新进展时通知我 |
+| **内容类别**（category） | 关注一大类信息 | 所有 tech_decision 类消息入库时通知我 |
+| **关键词**（keyword） | 关注特定关键词 | 任何消息提到"Elasticsearch"时通知我 |
+| **文档**（document） | 关注某篇发布的文档 | 文档被更新时通知我 |
+| **外部链接**（shared_link） | 关注某个分享的链接 | 链接卡片信息更新时通知我 |
+| **待办任务**（todo） | 关注某个任务的进度 | 任务状态变更时通知我 |
+| **工作流**（workflow） | 关注某个工作流执行 | 工作流完成或失败时通知我 |
+
+### 12.2 Web Dashboard 订阅操作
+
+**添加关注**：
+
+1. 进入 Web Dashboard → 「我的关注」
+2. 点击「添加关注」按钮
+3. 选择关注类型（用户/类别/关键词等）
+4. 搜索选择关注对象：
+   - 关注**用户**：输入姓名或用户名搜索
+   - 关注**话题线索**：输入标题关键词搜索
+   - 关注**类别**：从 9 大类别选择
+   - 关注**关键词**：直接输入关键词（支持自定义新词）
+5. 可选：设置过滤条件（如只关注某人发布的内容）
+6. 确认添加
+
+**管理关注列表**：
+
+- 进入「我的关注」可查看所有关注
+- 每条关注项显示最近触发时间和触发次数
+- 点击「取消关注」随时解除
+- 点击「静音」可临时暂停通知（不取消订阅）
+
+### 12.3 通知触发时机
+
+| 关注类型 | 何时触发通知 |
+|----------|-------------|
+| 关注用户 | 该用户发布文档、分享链接、创建对团队可见的待办 |
+| 关注话题线索 | 话题有新消息归入、摘要被更新（Stage5 完成后） |
+| 关注类别 | 该类别有新话题线索创建（摘要就绪后触发） |
+| 关注关键词 | 新入库内容的文本中包含该关键词（异步后台匹配） |
+| 关注文档 | 文档内容或分类被修改 |
+
+> **重要**：话题线索和类别的通知，在 AI 管家完成摘要生成（Stage 5）后才推送，确保你点进去时摘要已就绪。
+
+### 12.4 高级过滤（filter_criteria）
+
+关注类别或用户时，可设置额外过滤条件，精准控制推送范围：
+
+```
+示例 1：只关注「小王」发布到「reference_data」类别的内容
+  → 关注类型：category
+  → 目标：reference_data
+  → 过滤条件：{"author": "zhangsan"}
+
+示例 2：只关注含「redis」标签的内容
+  → 关注类型：category
+  → 目标：tech_decision
+  → 过滤条件：{"tags": ["redis"]}
+```
+
+过滤条件通过「添加关注」的高级选项设置（不影响基础关注功能）。
+
+---
+
+## §13 rf CLI 命令速查表
+
+`rf` 是 nullclaw 和开发者在命令行访问 RippleFlow 的主要入口，所有命令均对应后端 REST API。
+
+> **认证**：`rf` 使用 SSO Token 或 API Key 认证，首次运行 `rf login` 完成授权。
+
+### 13.1 通用命令
+
+| 命令 | 对应 API | 说明 |
+|------|----------|------|
+| `rf help` | — | 列出所有命令 |
+| `rf login` | `POST /auth/sso` | SSO 登录，保存 Token |
+| `rf whoami` | `GET /auth/me` | 查看当前登录用户信息 |
+
+### 13.2 知识库搜索与问答
+
+| 命令 | 对应 API | 说明 |
+|------|----------|------|
+| `rf threads list` | `GET /api/v1/threads` | 列出话题线索 |
+| `rf threads list --category tech_decision` | `GET /api/v1/threads?category=tech_decision` | 按类别筛选 |
+| `rf threads search "Redis配置"` | `GET /api/v1/threads/search?q=Redis配置` | 全文搜索话题 |
+| `rf qa "如何配置连接池"` | `POST /api/v1/qa` | 智能问答（FAQ优先，LLM兜底） |
+| `rf search "Elasticsearch" --type reference_data` | `GET /api/v1/search?q=...&entity_types=reference_data` | 多类型统一搜索 |
+| `rf reference search "redis_version"` | `GET /api/v1/search/reference?q=redis_version` | 参考数据专项搜索 |
+
+### 13.3 待办任务
+
+| 命令 | 对应 API | 说明 |
+|------|----------|------|
+| `rf todos list` | `GET /api/v1/todos` | 查看我的待办 |
+| `rf todos list --overdue` | `GET /api/v1/todos?status=overdue` | 查看逾期任务 |
+| `rf todos create --title "..." --assignee lisi` | `POST /api/v1/todos` | 创建待办 |
+| `rf todos done <todo_id>` | `PATCH /api/v1/todos/{id}/complete` | 完成待办 |
+| `rf todos done <id> --comment "已完成"` | `PATCH /api/v1/todos/{id}/complete` | 带备注完成 |
+
+### 13.4 敏感授权
+
+| 命令 | 对应 API | 说明 |
+|------|----------|------|
+| `rf sensitive pending` | `GET /api/v1/sensitive/pending` | 查看待授权的敏感消息 |
+| `rf sensitive approve <id>` | `POST /api/v1/sensitive/authorize` | 授权入库 |
+| `rf sensitive reject <id>` | `POST /api/v1/sensitive/authorize` | 拒绝入库 |
+
+### 13.5 内容发布（v0.7）
+
+| 命令 | 对应 API | 说明 |
+|------|----------|------|
+| `rf docs list` | `GET /api/v1/documents` | 列出我发布的文档 |
+| `rf docs create --title "..." --file doc.md` | `POST /api/v1/documents` | 创建富文本文档 |
+| `rf docs publish <doc_id>` | `POST /api/v1/documents/{id}/publish` | 发布文档（触发订阅通知） |
+| `rf links list` | `GET /api/v1/shared-links` | 列出分享的链接 |
+| `rf links add --url "https://..."` | `POST /api/v1/shared-links` | 添加外部链接卡片 |
+| `rf links refetch <link_id>` | `POST /api/v1/shared-links/{id}/refetch` | 重新抓取链接元数据 |
+
+### 13.6 订阅关注（v0.7）
+
+| 命令 | 对应 API | 说明 |
+|------|----------|------|
+| `rf subscriptions list` | `GET /api/v1/subscriptions` | 查看我的关注列表 |
+| `rf subscriptions add --type category --target tech_decision` | `POST /api/v1/subscriptions` | 关注类别 |
+| `rf subscriptions add --type keyword --target "Elasticsearch"` | `POST /api/v1/subscriptions` | 关注关键词 |
+| `rf subscriptions add --type user --target zhangsan` | `POST /api/v1/subscriptions` | 关注用户 |
+| `rf subscriptions remove <sub_id>` | `DELETE /api/v1/subscriptions/{id}` | 取消关注 |
+| `rf subscriptions targets --type thread --query "Redis"` | `GET /api/v1/subscriptions/followable-targets?entity_type=thread&q=Redis` | 搜索可关注对象 |
+
+### 13.7 管家与通知
+
+| 命令 | 对应 API | 说明 |
+|------|----------|------|
+| `rf butler digest --type daily` | `POST /api/v1/butler/digest` | 触发日报生成 |
+| `rf butler digest --type weekly` | `POST /api/v1/butler/digest` | 触发周报生成 |
+| `rf notifications list` | `GET /api/v1/notifications` | 查看通知列表 |
+| `rf notifications mark-read <id>` | `PATCH /api/v1/notifications/{id}/read` | 标记已读 |
+
+### 13.8 管理员命令
+
+| 命令 | 对应 API | 说明 |
+|------|----------|------|
+| `rf admin whitelist add <user_id>` | `POST /api/v1/admin/whitelist` | 添加白名单 |
+| `rf admin whitelist remove <user_id>` | `DELETE /api/v1/admin/whitelist/{id}` | 移除白名单 |
+| `rf admin butler-config list` | `GET /api/v1/admin/butler/config` | 查看管家推送配置 |
+| `rf admin butler-config set daily-digest --room announcements` | `PUT /api/v1/admin/butler/config/daily_digest_room` | 设置日报推送房间 |
+| `rf fields define --entity thread --key priority --type select` | `POST /api/v1/custom-fields/definitions` | 定义自定义属性 |
+
+---
+
 **文档版本历史（更新）**
 
 | 版本 | 日期 | 更新内容 |
@@ -2109,4 +2266,5 @@ RippleFlow 支持两种内容发布形式，让知识不仅来自群聊，也可
 | v1.0 | 2026-03-02 | 初始版本，覆盖全部核心功能和使用场景 |
 | v1.1 | 2026-03-05 | 新增 §8 真实用户完整时序、§9 AI管家完整操作手册 |
 | v1.2 | 2026-03-05 | 新增 §10 内容发布（文档+链接）、§11 AI 智能辅助输入说明 |
+| v1.3 | 2026-03-05 | 新增 §12 关注与订阅管理、§13 rf CLI 命令速查表（API 同步） |
 

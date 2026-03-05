@@ -2251,6 +2251,505 @@ async def test_search_faq_returns_sorted_by_view_count(mock_faq_repo):
 
 ---
 
+## 20. UserDocumentService（富文本文档服务 - v0.7）
+
+```python
+# tests/unit/test_user_document_service.py
+
+@pytest.mark.asyncio
+async def test_create_document_triggers_butler_suggestion():
+    """创建文档时，如果有标题/内容，应触发管家字段建议（category/tags）"""
+    mock_butler = AsyncMock()
+    mock_butler.suggest.return_value = [
+        {"value": "tech_decision", "confidence": 0.91, "reason": "内容涉及技术选型"}
+    ]
+    svc = UserDocumentService(butler_suggestion_service=mock_butler, ...)
+
+    doc = await svc.create_document(
+        author_id="zhangsan",
+        title="Redis 连接池配置最佳实践",
+        content="# 背景\n我们在生产环境遇到连接池耗尽的问题...",
+        group_id="tech-team",
+    )
+
+    # 管家建议被触发
+    mock_butler.suggest.assert_called_once()
+    call_kwargs = mock_butler.suggest.call_args.kwargs
+    assert call_kwargs["field"] == "category"
+    assert doc.id is not None
+
+
+@pytest.mark.asyncio
+async def test_publish_document_triggers_subscription_event():
+    """发布文档后应触发 ISubscriptionService.publish_event()"""
+    mock_sub = AsyncMock()
+    mock_sub.publish_event.return_value = ["user-001", "user-002"]
+    svc = UserDocumentService(subscription_service=mock_sub, ...)
+
+    await svc.publish_document(doc_id=uuid4(), publisher_id="zhangsan")
+
+    mock_sub.publish_event.assert_called_once()
+    args = mock_sub.publish_event.call_args
+    assert args.kwargs["event_type"] == "document_published"
+    assert args.kwargs["target_type"] == "document"
+
+
+@pytest.mark.asyncio
+async def test_get_document_private_non_author_raises_forbidden():
+    """visibility=private 的文档，非作者访问应抛 ForbiddenError"""
+    mock_repo = AsyncMock()
+    mock_repo.get.return_value = {
+        "id": str(uuid4()), "author_id": "zhangsan",
+        "visibility": "private", "published_at": datetime.utcnow().isoformat(),
+    }
+    svc = UserDocumentService(doc_repo=mock_repo, ...)
+
+    with pytest.raises(ForbiddenError):
+        await svc.get_document(doc_id=uuid4(), requester_id="lisi")
+```
+
+---
+
+## 21. SharedLinkService（外部链接服务 - v0.7）
+
+```python
+# tests/unit/test_shared_link_service.py
+
+@pytest.mark.asyncio
+async def test_create_link_queues_og_fetch():
+    """创建链接后应异步触发 OG 元数据抓取（不阻塞主流程）"""
+    mock_task_queue = AsyncMock()
+    svc = SharedLinkService(task_queue=mock_task_queue, ...)
+
+    link = await svc.create_link(
+        url="https://redis.io/docs/",
+        shared_by="zhangsan",
+        group_id="tech-team",
+    )
+
+    # 主流程立即返回 link，OG 抓取入队
+    assert link.id is not None
+    mock_task_queue.enqueue.assert_called_once_with(
+        "fetch_og_metadata", link_id=link.id, url="https://redis.io/docs/"
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_link_og_fetch_failure_graceful():
+    """OG 抓取失败时，链接仍正常创建，title 等字段为 None（等待手动填写）"""
+    mock_og_fetcher = AsyncMock()
+    mock_og_fetcher.fetch.side_effect = TimeoutError("OG fetch timeout")
+    svc = SharedLinkService(og_fetcher=mock_og_fetcher, ...)
+
+    link = await svc.create_link(url="https://internal-wiki/page", shared_by="zhangsan")
+
+    # 不抛异常，title 为 None
+    assert link.id is not None
+    assert link.title is None
+    assert link.metadata_fetched_at is None
+
+
+@pytest.mark.asyncio
+async def test_refetch_metadata_updates_existing_fields():
+    """refetch 应更新 title/description/preview_image，并刷新 metadata_fetched_at"""
+    mock_repo = AsyncMock()
+    mock_repo.get.return_value = {"id": "link-001", "url": "https://redis.io/docs/", "title": None}
+    mock_og_fetcher = AsyncMock()
+    mock_og_fetcher.fetch.return_value = {
+        "title": "Redis Documentation",
+        "description": "Official Redis docs",
+        "site_name": "Redis",
+    }
+    svc = SharedLinkService(link_repo=mock_repo, og_fetcher=mock_og_fetcher, ...)
+
+    await svc.refetch_metadata(link_id=uuid4())
+
+    mock_repo.update.assert_called_once()
+    update_kwargs = mock_repo.update.call_args.kwargs
+    assert update_kwargs["title"] == "Redis Documentation"
+    assert update_kwargs["metadata_fetched_at"] is not None
+```
+
+---
+
+## 22. ButlerSuggestionService（AI 智能辅助输入 - v0.7）
+
+```python
+# tests/unit/test_butler_suggestion_service.py
+
+@pytest.mark.asyncio
+async def test_suggest_high_confidence_returns_auto_apply_flag():
+    """confidence > 0.9 的建议应在响应中标记可 auto_apply"""
+    mock_llm = AsyncMock()
+    mock_llm.call.return_value = '[{"value":"tech_decision","confidence":0.95,"reason":"技术选型讨论"}]'
+    svc = ButlerSuggestionService(llm_service=mock_llm, ...)
+
+    suggestions = await svc.suggest(
+        user_id="zhangsan",
+        entity_type="document",
+        field="category",
+        content="我们决定使用 Redis Cluster",
+    )
+
+    assert len(suggestions) == 1
+    assert suggestions[0]["value"] == "tech_decision"
+    assert suggestions[0]["confidence"] == 0.95
+    assert suggestions[0].get("auto_apply") is True  # confidence > 0.9
+
+
+@pytest.mark.asyncio
+async def test_suggest_same_context_hash_skips_llm():
+    """相同 context_hash 在短时间内（5分钟）再次触发，应跳过 LLM 返回缓存结果"""
+    mock_repo = AsyncMock()
+    mock_repo.find_recent.return_value = {
+        "context_hash": "abc123",
+        "suggestions": '[{"value":"qa_faq","confidence":0.8,"reason":"问答类内容"}]',
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    mock_llm = AsyncMock()
+    svc = ButlerSuggestionService(suggestion_repo=mock_repo, llm_service=mock_llm, ...)
+
+    result = await svc.suggest(
+        user_id="zhangsan", entity_type="todo", field="category", content="如何配置 Redis"
+    )
+
+    # LLM 未被调用，返回缓存
+    mock_llm.call.assert_not_called()
+    assert result[0]["value"] == "qa_faq"
+
+
+@pytest.mark.asyncio
+async def test_record_feedback_ai_applied_true_marks_auto_apply():
+    """ai_applied=True 时，record_feedback 将 butler_suggestions.ai_applied 置为 True"""
+    mock_repo = AsyncMock()
+    svc = ButlerSuggestionService(suggestion_repo=mock_repo, ...)
+
+    await svc.record_feedback(
+        suggestion_id=uuid4(),
+        applied=True,
+        applied_value="tech_decision",
+        ai_applied=True,  # 系统 auto_apply 触发
+    )
+
+    mock_repo.update.assert_called_once()
+    update_kwargs = mock_repo.update.call_args.kwargs
+    assert update_kwargs["ai_applied"] is True
+    assert update_kwargs["applied_value"] == "tech_decision"
+
+
+@pytest.mark.asyncio
+async def test_link_entity_fills_orphan_suggestions():
+    """link_entity 应将 entity_id=NULL 的孤儿建议回填正确 entity_id"""
+    target_entity_id = uuid4()
+    mock_repo = AsyncMock()
+    mock_repo.find_orphans.return_value = [
+        {"id": str(uuid4()), "entity_id": None, "entity_type": "document"},
+        {"id": str(uuid4()), "entity_id": None, "entity_type": "document"},
+    ]
+    svc = ButlerSuggestionService(suggestion_repo=mock_repo, ...)
+
+    updated = await svc.link_entity(
+        user_id="zhangsan", entity_type="document", entity_id=target_entity_id
+    )
+
+    assert updated == 2  # 2 条孤儿建议被回填
+    assert mock_repo.bulk_update_entity_id.call_count == 1
+```
+
+---
+
+## 23. NullclawPublisherService（事件推送 - v0.8）
+
+```python
+# tests/unit/test_nullclaw_publisher_service.py
+
+@pytest.mark.asyncio
+async def test_notify_nullclaw_single_thread_payload_format():
+    """单线索消息应发送正确格式的 payload（thread_id 在顶层）"""
+    mock_http = AsyncMock()
+    mock_http.post.return_value = MagicMock(status_code=200)
+    svc = NullclawPublisherService(http_client=mock_http, ...)
+
+    result = await svc.notify_nullclaw(
+        event_type="message_processed",
+        payload={
+            "thread_id": "thread-001",
+            "category": "tech_decision",
+            "new_message_ids": ["msg-001"],
+            "is_new_thread": True,
+        },
+    )
+
+    assert result is True
+    sent_payload = mock_http.post.call_args.kwargs["json"]
+    assert "thread_id" in sent_payload
+    assert "thread_updates" not in sent_payload
+
+
+@pytest.mark.asyncio
+async def test_notify_nullclaw_multi_thread_uses_thread_updates():
+    """多线索消息应使用 thread_updates 数组格式"""
+    mock_http = AsyncMock()
+    mock_http.post.return_value = MagicMock(status_code=200)
+    svc = NullclawPublisherService(http_client=mock_http, ...)
+
+    result = await svc.notify_nullclaw(
+        event_type="message_processed",
+        payload={
+            "message_id": "msg-001",
+            "thread_updates": [
+                {"thread_id": "thread-001", "category": "tech_decision", "is_new_thread": True},
+                {"thread_id": "thread-002", "category": "reference_data", "is_new_thread": False},
+            ],
+        },
+    )
+
+    assert result is True
+    sent = mock_http.post.call_args.kwargs["json"]
+    assert "thread_updates" in sent
+    assert len(sent["thread_updates"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_notify_nullclaw_timeout_writes_pending_event():
+    """HTTP 超时后应写入 nullclaw_pending_events，thread_id 正确填入"""
+    mock_http = AsyncMock()
+    mock_http.post.side_effect = asyncio.TimeoutError()
+    mock_repo = AsyncMock()
+    svc = NullclawPublisherService(http_client=mock_http, pending_repo=mock_repo, ...)
+
+    result = await svc.notify_nullclaw(
+        event_type="message_processed",
+        payload={"thread_id": "thread-001", "category": "tech_decision", "new_message_ids": []},
+    )
+
+    assert result is False  # 返回 False 表示进入了 pending 队列
+    mock_repo.create.assert_called_once()
+    pending_record = mock_repo.create.call_args.kwargs
+    assert pending_record["thread_id"] == "thread-001"  # GAP-10：thread_id 正确存储
+
+
+@pytest.mark.asyncio
+async def test_retry_pending_events_ordered_by_thread_id_and_created_at():
+    """同一 thread_id 的事件应按 created_at ASC 顺序投递"""
+    earlier_event = {"id": "e1", "thread_id": "thread-001", "created_at": "2026-03-05T09:00:00Z"}
+    later_event   = {"id": "e2", "thread_id": "thread-001", "created_at": "2026-03-05T09:01:00Z"}
+    mock_repo = AsyncMock()
+    mock_repo.get_pending.return_value = [later_event, earlier_event]  # 故意乱序
+    mock_http = AsyncMock()
+    mock_http.post.return_value = MagicMock(status_code=200)
+    svc = NullclawPublisherService(http_client=mock_http, pending_repo=mock_repo, ...)
+
+    delivered = await svc.retry_pending_events()
+
+    # 验证 e1（earlier）先于 e2（later）被投递
+    calls = mock_http.post.call_args_list
+    assert calls[0].kwargs["json"]["event_id"] == "e1"
+    assert calls[1].kwargs["json"]["event_id"] == "e2"
+    assert delivered == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_null_thread_id_events_process_in_parallel():
+    """thread_id=NULL 的事件（如 sensitive_resolved）不受有序约束，可并行重试"""
+    events = [
+        {"id": "e1", "thread_id": None, "event_type": "sensitive_resolved"},
+        {"id": "e2", "thread_id": None, "event_type": "sensitive_resolved"},
+    ]
+    mock_repo = AsyncMock()
+    mock_repo.get_pending.return_value = events
+    mock_http = AsyncMock()
+    mock_http.post.return_value = MagicMock(status_code=200)
+    svc = NullclawPublisherService(http_client=mock_http, pending_repo=mock_repo, ...)
+
+    delivered = await svc.retry_pending_events()
+
+    # 两条均成功投递
+    assert delivered == 2
+    assert mock_http.post.call_count == 2
+```
+
+---
+
+## 24. AuthService - API Key 认证（v0.8 GAP-9）
+
+```python
+# tests/unit/test_auth_service_api_key.py
+
+@pytest.mark.asyncio
+async def test_verify_api_key_valid_returns_system_user():
+    """合法 ApiKey 应返回 is_system=True 的系统用户信息"""
+    import hashlib
+    plaintext = "test-nullclaw-secret-key"
+    key_hash = hashlib.sha256(plaintext.encode()).hexdigest()
+
+    mock_repo = AsyncMock()
+    mock_repo.find_by_api_key_hash.return_value = {
+        "user_id": "nullclaw-system",
+        "role": "system",
+        "is_system": True,
+        "is_active": True,
+        "display_name": "nullclaw",
+    }
+    svc = AuthService(whitelist_repo=mock_repo, ...)
+
+    user_info = await svc.verify_api_key(f"ApiKey {plaintext}")
+
+    assert user_info["role"] == "system"
+    assert user_info["is_system"] is True
+    mock_repo.find_by_api_key_hash.assert_called_once_with(key_hash)
+
+
+@pytest.mark.asyncio
+async def test_verify_api_key_wrong_format_raises():
+    """格式非 'ApiKey <key>' 的 header 应抛 AuthenticationError"""
+    svc = AuthService(...)
+
+    with pytest.raises(AuthenticationError, match="Invalid API key format"):
+        await svc.verify_api_key("Bearer some-jwt-token")
+
+
+@pytest.mark.asyncio
+async def test_verify_api_key_unknown_hash_raises():
+    """DB 中无匹配 hash 记录时应抛 AuthenticationError"""
+    mock_repo = AsyncMock()
+    mock_repo.find_by_api_key_hash.return_value = None
+    svc = AuthService(whitelist_repo=mock_repo, ...)
+
+    with pytest.raises(AuthenticationError, match="Invalid API key"):
+        await svc.verify_api_key("ApiKey unknown-key-12345")
+```
+
+---
+
+## 25. SearchService - find_reference（v0.8 GAP-12/13）
+
+```python
+# tests/unit/test_search_service_find_reference.py
+
+@pytest.mark.asyncio
+async def test_find_reference_excludes_deprecated_by_default():
+    """默认情况下，find_reference 不返回 deprecated_at 非 NULL 的记录"""
+    mock_repo = AsyncMock()
+    mock_repo.search_reference.return_value = [
+        {"id": "r1", "key_name": "redis_version", "value": "6.2.6", "deprecated_at": "2026-03-05T00:00:00Z"},
+        {"id": "r2", "key_name": "redis_version", "value": "7.0.5", "deprecated_at": None},
+    ]
+    svc = SearchService(reference_repo=mock_repo, ...)
+
+    results = await svc.find_reference(query="redis_version")
+
+    # 只返回未废弃的记录
+    assert len(results) == 1
+    assert results[0]["value"] == "7.0.5"
+
+
+@pytest.mark.asyncio
+async def test_find_reference_sensitive_hides_value():
+    """is_sensitive=True 的记录，非当事人访问时 value 字段不返回"""
+    mock_repo = AsyncMock()
+    mock_repo.search_reference.return_value = [
+        {"id": "r1", "key_name": "salary_zhangsan", "value": "35K",
+         "is_sensitive": True, "label": "张三薪资", "deprecated_at": None},
+    ]
+    svc = SearchService(reference_repo=mock_repo, ...)
+
+    results = await svc.find_reference(query="薪资", requester_id="lisi")  # 非当事人
+
+    assert len(results) == 1
+    assert "value" not in results[0]   # GAP-13：value 不暴露
+    assert results[0]["label"] == "张三薪资"  # label 正常返回
+
+
+@pytest.mark.asyncio
+async def test_find_reference_include_deprecated_returns_all():
+    """include_deprecated=True 时，废弃记录也一并返回"""
+    mock_repo = AsyncMock()
+    mock_repo.search_reference.return_value = [
+        {"id": "r1", "value": "6.2.6", "deprecated_at": "2026-03-05T00:00:00Z"},
+        {"id": "r2", "value": "7.0.5", "deprecated_at": None},
+    ]
+    svc = SearchService(reference_repo=mock_repo, ...)
+
+    results = await svc.find_reference(query="redis", include_deprecated=True)
+
+    assert len(results) == 2
+```
+
+---
+
+## 26. ButlerPushConfigService（管家推送配置 - v0.8 GAP-15）
+
+```python
+# tests/unit/test_butler_push_config_service.py
+
+@pytest.mark.asyncio
+async def test_get_config_returns_only_enabled():
+    """get_config 应只返回 enabled=True 的配置条目"""
+    mock_repo = AsyncMock()
+    mock_repo.list_by_group.return_value = [
+        {"config_type": "daily_digest_room", "target_room_id": "general", "enabled": True},
+        {"config_type": "alert_room",        "target_room_id": "ops",     "enabled": False},
+    ]
+    svc = ButlerPushConfigService(config_repo=mock_repo, ...)
+
+    configs = await svc.get_config(group_id="default")
+
+    assert len(configs) == 1
+    assert configs[0]["config_type"] == "daily_digest_room"
+
+
+@pytest.mark.asyncio
+async def test_upsert_config_idempotent():
+    """相同 group_id + config_type 二次 upsert 应更新不新增"""
+    mock_repo = AsyncMock()
+    mock_repo.upsert.return_value = {
+        "group_id": "default", "config_type": "daily_digest_room",
+        "target_room_id": "announcements", "enabled": True,
+    }
+    svc = ButlerPushConfigService(config_repo=mock_repo, ...)
+
+    result = await svc.upsert_config(
+        group_id="default",
+        config_type="daily_digest_room",
+        target_room_id="announcements",
+        updated_by="admin",
+    )
+
+    mock_repo.upsert.assert_called_once()
+    assert result["target_room_id"] == "announcements"
+
+
+@pytest.mark.asyncio
+async def test_disable_config_makes_it_invisible():
+    """禁用后 get_config 不返回该条目"""
+    mock_repo = AsyncMock()
+    call_count = {"n": 0}
+
+    async def mock_list(group_id, config_type=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return [{"config_type": "weekly_report_room", "enabled": True}]
+        return []  # 禁用后返回空
+
+    mock_repo.list_by_group.side_effect = mock_list
+    mock_repo.set_enabled = AsyncMock()
+    svc = ButlerPushConfigService(config_repo=mock_repo, ...)
+
+    # 禁用前可见
+    before = await svc.get_config(group_id="default")
+    assert len(before) == 1
+
+    await svc.disable_config(group_id="default", config_type="weekly_report_room")
+
+    # 禁用后不可见
+    after = await svc.get_config(group_id="default")
+    assert len(after) == 0
+    mock_repo.set_enabled.assert_called_once_with("default", "weekly_report_room", False)
+```
+
+---
+
 ## 20. 附录：测试用例索引
 
 | ID | 服务 | 方法 | 测试场景 | 覆盖业务规则 |
@@ -2343,3 +2842,27 @@ async def test_search_faq_returns_sorted_by_view_count(mock_faq_repo):
 | TC-FAQ-07 | FaqService | merge_items | 合并保留所有 source_threads | 数据完整性 |
 | TC-FAQ-08 | FaqService | submit_feedback | unhelpful 不增加 helpful_count | 计数逻辑 |
 | TC-FAQ-09 | FaqService | search | 按 view_count 排序 | 搜索排序 |
+| TC-DOC-01 | UserDocumentService | create_document | 创建文档触发管家建议 | 创建流程 |
+| TC-DOC-02 | UserDocumentService | publish_document | 发布后触发订阅通知 | 发布流程 |
+| TC-DOC-03 | UserDocumentService | get_document | visibility=private 非作者不可见 | 权限控制 |
+| TC-LNK-01 | SharedLinkService | create_link | 创建链接触发异步 OG 抓取 | 元数据抓取 |
+| TC-LNK-02 | SharedLinkService | create_link | OG 抓取失败时降级为手动输入 | 抓取降级 |
+| TC-LNK-03 | SharedLinkService | refetch_metadata | 重新抓取更新元数据 | 元数据刷新 |
+| TC-SGT-01 | ButlerSuggestionService | suggest | confidence>0.9 标记 auto_apply | 建议强度 |
+| TC-SGT-02 | ButlerSuggestionService | suggest | 相同 context_hash 短期内不重复触发 | 防抖去重 |
+| TC-SGT-03 | ButlerSuggestionService | record_feedback | ai_applied=true 时记录隐式反馈 | 反馈学习 |
+| TC-SGT-04 | ButlerSuggestionService | link_entity | 孤儿建议正确回填 entity_id | 孤儿回填 |
+| TC-NUL-01 | NullclawPublisherService | notify_nullclaw | 单线索 payload 格式正确 | payload格式 |
+| TC-NUL-02 | NullclawPublisherService | notify_nullclaw | 多线索消息发送 thread_updates 数组 | 多线索格式 |
+| TC-NUL-03 | NullclawPublisherService | notify_nullclaw | 超时 500ms 写入 pending_events | 降级存储 |
+| TC-NUL-04 | NullclawPublisherService | retry_pending_events | 同一 thread_id 按 created_at 有序重放 | 有序重试 |
+| TC-NUL-05 | NullclawPublisherService | retry_pending_events | thread_id=NULL 事件并行重试 | 无序事件并行 |
+| TC-AUTH-05 | AuthService | verify_api_key | 合法 ApiKey 返回 system 用户信息 | API Key 认证 |
+| TC-AUTH-06 | AuthService | verify_api_key | 格式错误 header 抛 AuthenticationError | 格式校验 |
+| TC-AUTH-07 | AuthService | verify_api_key | 未知 key hash 抛 AuthenticationError | Key 校验 |
+| TC-SCH-05 | SearchService | find_reference | 返回最新非 deprecated 记录 | 废弃过滤 |
+| TC-SCH-06 | SearchService | find_reference | is_sensitive=True 不返回 value 字段 | 敏感隐藏 |
+| TC-SCH-07 | SearchService | find_reference | include_deprecated=True 返回废弃记录 | 包含废弃 |
+| TC-CFG-01 | ButlerPushConfigService | get_config | 仅返回 enabled=True 的配置 | 状态过滤 |
+| TC-CFG-02 | ButlerPushConfigService | upsert_config | 重复 upsert 更新不新增记录 | 幂等更新 |
+| TC-CFG-03 | ButlerPushConfigService | disable_config | 禁用后 get_config 不返回该条目 | 禁用生效 |

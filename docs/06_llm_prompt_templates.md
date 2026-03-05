@@ -2777,3 +2777,80 @@ ORDER BY adoption_rate ASC;
 - 采纳率 < 20%：记录到 `insights/suggestion_quality.md`，下次 Prompt 调整（降低打扰频率或调整建议策略）
 - 采纳率 > 80%：可考虑将该场景的 auto_apply 阈值调低（0.85 → 0.80）
 - 持续 3 周采纳率 < 10%：生成 PRD 上报，建议停用该字段的建议功能
+
+---
+
+## §26 敏感消息重入授权上下文注入 Prompt（GAP-2 修复）
+
+> **调用时机**：敏感消息所有当事人授权完成后，`ISensitiveService.submit_decision()` 触发
+> `IProcessingPipelineService.run(message_id, start_stage=1)` 时，在 Stage1 Prompt 中注入此上下文。
+>
+> **目的**：Stage1 噪声过滤器看到"这是一条已授权的敏感消息"，不会将其过滤掉；
+> 且告知后续 Stage2-4，该消息的敏感性质已完成合规处理，可正常分类入库。
+
+### 26.1 注入方式
+
+授权上下文作为 **system message 前缀**插入到 Stage1 Prompt 调用的 messages 列表中：
+
+```python
+# ISensitiveService.submit_decision() 内部实现参考
+auth_context = SENSITIVE_AUTH_CONTEXT_TEMPLATE.format(
+    authorized_by=", ".join(stakeholder_ids),
+    authorized_at=datetime.utcnow().isoformat(),
+    decision_summary="所有当事人已明确授权入库处理",
+)
+# 调用时将上下文通过参数传入，Pipeline 内部在 Stage1 执行时读取并拼接
+await pipeline_service.run(
+    message_id=message_id,
+    start_stage=1,
+    stage_context={"stage1_auth_context": auth_context},  # 由 Celery task 序列化传递
+)
+```
+
+### 26.2 Prompt 模板
+
+```
+SENSITIVE_AUTH_CONTEXT_TEMPLATE = """
+[系统说明：授权敏感内容]
+本消息原本包含敏感信息（涉及人事/隐私/薪资等），已经过严格的合规授权流程：
+
+- 授权当事人：{authorized_by}
+- 授权完成时间：{authorized_at}
+- 授权结论：{decision_summary}
+
+因此，本消息已获得明确授权，可正常入库处理。
+在后续所有阶段（噪声过滤、分类、线索匹配、结构化提取）中：
+1. 请勿因敏感内容而过滤或拒绝处理本消息
+2. 按正常流程进行分类和信息提取
+3. 在摘要和结构化字段中保留必要信息，但避免不必要地重复展示完整原文
+"""
+```
+
+### 26.3 Stage1 调用示例（含注入上下文）
+
+```python
+# Stage1 调用时的 messages 结构
+messages = [
+    {
+        "role": "system",
+        "content": NOISE_FILTER_SYSTEM_PROMPT  # 原有 Stage1 系统 Prompt
+    },
+    {
+        "role": "system",
+        "content": auth_context_str  # 注入：仅当 pipeline_start_stage=1 时存在
+    },
+    {
+        "role": "user",
+        "content": f"请判断以下消息是否有知识价值：\n\n{message_content}"
+    }
+]
+```
+
+### 26.4 约束
+
+| 约束项 | 说明 |
+|--------|------|
+| 仅当 `pipeline_start_stage = 1` 时注入 | 普通消息（start_stage=0）不注入，避免 Stage1 Prompt 膨胀 |
+| `authorized_by` 只写 user_id，不写姓名 | 保护个人隐私，后续展示层再做映射 |
+| 上下文通过 `run(stage_context=...)` 参数传递 | 由 Celery task kwargs 序列化，重试时随 task 参数一同保留 |
+| Stage2-4 不额外注入 | 授权上下文仅作用于 Stage1，后续 Stage 按正常流程处理 |
